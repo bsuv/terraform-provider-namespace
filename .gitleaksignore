@@ -1,0 +1,2 @@
+# Add only exact, reviewed false-positive fingerprints here. Never suppress a
+# rule, directory, credential, or private-key fixture to make the gate pass.
