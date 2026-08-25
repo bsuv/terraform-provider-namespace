@@ -1,0 +1,278 @@
+name: Tests & Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  dependencies:
+    name: Dependency Freshness & Mod Tidy Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.7'
+          cache: true
+
+      - name: Verify Module Tidy & Dependencies
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+          go mod verify
+
+  lint-and-unit:
+    name: Lint & Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.7'
+          cache: true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: '1.11.0'
+          terraform_wrapper: false
+
+      - name: Go Format Check
+        run: |
+          test -z "$(gofmt -l .)" || (echo "Unformatted Go files found:" && gofmt -l . && exit 1)
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.1
+          args: --timeout=5m ./...
+
+      - name: Run actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Run shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: Install Gitleaks 8.30.0
+        run: |
+          gitleaks_dir="${RUNNER_TEMP}/gitleaks-bin"
+          bash ./scripts/install-gitleaks.sh "${gitleaks_dir}"
+          echo "${gitleaks_dir}" >> "${GITHUB_PATH}"
+
+      - name: Secret Scanning Check
+        run: bash ./scripts/secret-scan.sh
+
+      - name: Run Tests (with Race Detector)
+        run: go test -v -race -count=1 -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Reachable Vulnerability Check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+      - name: Test Acceptance Report Evidence Contracts
+        run: bash ./scripts/test_report_adversarial.sh
+
+  docs-validation:
+    name: Documentation Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.7'
+          cache: true
+
+      - name: Generate tfplugindocs & Check Diff
+        run: |
+          go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs generate --provider-name namespace --rendered-provider-name "Namespace Cloud"
+          git diff --exit-code docs/ || (echo "Generated documentation in docs/ is out of date. Run tfplugindocs generate." && exit 1)
+
+      - name: Validate Documentation
+        run: |
+          go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs validate --provider-name namespace
+
+  terraform-examples:
+    name: Terraform Examples Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        terraform_version: ['1.11.0', 'latest']
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.7'
+          cache: true
+
+      - name: Set up Terraform (${{ matrix.terraform_version }})
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ matrix.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive .
+
+      - name: Build Provider & Configure Filesystem Mirror
+        run: |
+          mkdir -p /tmp/mirror/registry.terraform.io/bsuv/namespace/0.1.0/linux_amd64
+          CGO_ENABLED=0 go build -o /tmp/mirror/registry.terraform.io/bsuv/namespace/0.1.0/linux_amd64/terraform-provider-namespace_v0.1.0 .
+
+          cat << 'EOF' > /tmp/mirror.tfrc
+          provider_installation {
+            filesystem_mirror {
+              path    = "/tmp/mirror"
+              include = ["*/*"]
+            }
+            direct {
+              exclude = ["*/*"]
+            }
+          }
+          EOF
+
+      - name: Validate All Example Configurations
+        run: |
+          export TF_CLI_CONFIG_FILE=/tmp/mirror.tfrc
+          FAILED=0
+          for dir in examples/data-sources/* examples/ephemeral-resources/* examples/resources/* examples/provider; do
+            if [ -d "$dir" ]; then
+              echo "Validating $dir..."
+              terraform -chdir="$dir" init -backend=false >/dev/null || { echo "Init failed for $dir"; FAILED=1; }
+              terraform -chdir="$dir" validate || { echo "Validate failed for $dir"; FAILED=1; }
+            fi
+          done
+          if [ $FAILED -ne 0 ]; then
+            echo "One or more example configurations failed validation."
+            exit 1
+          fi
+          echo "All example configurations validated successfully."
+
+  goreleaser-snapshot:
+    name: GoReleaser Snapshot & Packaging Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.7'
+          cache: true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: '1.11.0'
+          terraform_wrapper: false
+
+      - name: Run GoReleaser Check
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: 'v2.17.1'
+          args: check
+
+      - name: Build GoReleaser Snapshot
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: 'v2.17.1'
+          args: release --snapshot --clean --skip=publish,sign
+
+      - name: Stage GoReleaser Snapshot Assets
+        run: bash ./scripts/stage-goreleaser-snapshot.sh dist "${RUNNER_TEMP}/snapshot-dist"
+
+      - name: Execute Snapshot Artifact Smoke Test
+        run: bash ./scripts/smoke-test.sh --dist-dir "${RUNNER_TEMP}/snapshot-dist" --allow-unsigned-snapshot
+
+  current-dependencies:
+    name: Current Dependencies & Toolchain Lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go (1.27.x)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          cache: true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 'latest'
+          terraform_wrapper: false
+
+      - name: Upgrade to Newest Compatible Dependencies
+        run: |
+          echo "Upgrading dependencies to the newest versions compatible with Go 1.27..."
+          go get -u ./...
+          go mod tidy
+          go mod verify
+
+      - name: Generate Dependency Upgrade Report
+        run: |
+          {
+            echo "# Current Dependencies Upgrade Report"
+            echo "Generated on: $(date -u)"
+            echo ""
+            echo "## go.mod diff against baseline:"
+            git diff go.mod || true
+            echo ""
+            echo "## Current Active Module Versions:"
+            go list -m -u all || true
+          } > dependency-report.txt
+          cat dependency-report.txt
+
+      - name: Upload Dependency Report Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: current-dependencies-report
+          path: dependency-report.txt
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Run Tests (Race Detector)
+        run: go test -v -race -count=1 ./...

@@ -1,0 +1,180 @@
+name: Acceptance Tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *' # Run nightly at 04:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acceptance-singleton-guard
+  cancel-in-progress: false
+
+jobs:
+  acceptance-matrix:
+    name: Acceptance Tests Matrix (Live API)
+    runs-on: ubuntu-latest
+    environment: acceptance
+    timeout-minutes: 120
+    if: github.repository == 'bsuv/terraform-provider-namespace' && (github.event_name != 'schedule' || vars.ENABLE_NIGHTLY_ACCEPTANCE == 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        terraform: ['1.11.0', 'latest']
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.7'
+          cache: true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ matrix.terraform }}
+          terraform_wrapper: false
+
+      - name: Run Acceptance Tests (Non-Singleton Resources)
+        id: run-matrix-tests
+        env:
+          TF_ACC: "1"
+          NSC_RUN_ID: ${{ github.run_id }}-${{ matrix.terraform }}
+          NSC_TOKEN: ${{ secrets.NSC_TOKEN }}
+          NSC_PARTNER_TOKEN: ${{ secrets.NSC_PARTNER_TOKEN }}
+          NSC_TRUSTED_JWT: ${{ secrets.NSC_TRUSTED_JWT }}
+          NSC_ENDPOINT: ${{ secrets.NSC_ENDPOINT }}
+          NSC_TEST_TENANT: ${{ secrets.NSC_TEST_TENANT }}
+          NSC_TEST_IMAGE_REPO: ${{ secrets.NSC_TEST_IMAGE_REPO }}
+          NSC_TEST_IMAGE_DIGEST: ${{ secrets.NSC_TEST_IMAGE_DIGEST }}
+          NSC_TEST_PAGINATED_IMAGE_REPO: ${{ secrets.NSC_TEST_PAGINATED_IMAGE_REPO }}
+          NSC_TEST_CACHE_VOLUME_TAG: ${{ secrets.NSC_TEST_CACHE_VOLUME_TAG }}
+          NSC_TEST_PV_TAG: ${{ secrets.NSC_TEST_PV_TAG }}
+          NSC_TEST_VAULT_SECRET_ID: ${{ secrets.NSC_TEST_VAULT_SECRET_ID }}
+        run: |
+          mkdir -p test-reports-matrix
+          go test -v -json -count=1 -timeout 120m ./internal/provider/... -run '^TestAcc' -skip '^TestAccRegistryPolicy_Default$' > "${RUNNER_TEMP:-/tmp}/test-matrix.json"
+
+      - name: Generate Acceptance Test Report & JUnit Artifacts
+        if: always()
+        run: |
+          bash ./scripts/generate-acceptance-report.sh \
+            --input "${RUNNER_TEMP:-/tmp}/test-matrix.json" \
+            --output-dir test-reports-matrix \
+            --commit-sha "${{ github.sha }}" \
+            --run-link "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --run-id "${{ github.run_id }}" \
+            --tf-version "${{ matrix.terraform }}" \
+            --suite matrix
+          cat test-reports-matrix/acceptance-report.md
+
+      - name: Archive Acceptance Test Artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: acceptance-artifacts-matrix-${{ matrix.terraform }}
+          path: test-reports-matrix/
+          retention-days: 14
+
+      - name: Run Guarded Post-Test Sweeper
+        if: always()
+        env:
+          TF_ACC: "1"
+          NSC_RUN_ID: ${{ github.run_id }}-${{ matrix.terraform }}
+          NSC_TOKEN: ${{ secrets.NSC_TOKEN }}
+          NSC_PARTNER_TOKEN: ${{ secrets.NSC_PARTNER_TOKEN }}
+          NSC_TRUSTED_JWT: ${{ secrets.NSC_TRUSTED_JWT }}
+          NSC_ENDPOINT: ${{ secrets.NSC_ENDPOINT }}
+          NSC_TEST_TENANT: ${{ secrets.NSC_TEST_TENANT }}
+          NSC_TEST_IMAGE_REPO: ${{ secrets.NSC_TEST_IMAGE_REPO }}
+          NSC_TEST_IMAGE_DIGEST: ${{ secrets.NSC_TEST_IMAGE_DIGEST }}
+          NSC_TEST_PAGINATED_IMAGE_REPO: ${{ secrets.NSC_TEST_PAGINATED_IMAGE_REPO }}
+          NSC_TEST_CACHE_VOLUME_TAG: ${{ secrets.NSC_TEST_CACHE_VOLUME_TAG }}
+          NSC_TEST_PV_TAG: ${{ secrets.NSC_TEST_PV_TAG }}
+          NSC_TEST_VAULT_SECRET_ID: ${{ secrets.NSC_TEST_VAULT_SECRET_ID }}
+        run: go test -v -count=1 -timeout 20m ./internal/provider/... -sweep=all
+
+  acceptance-singletons:
+    name: Acceptance Tests Singletons (Live API)
+    runs-on: ubuntu-latest
+    environment: acceptance
+    timeout-minutes: 30
+    needs: acceptance-matrix
+    if: github.repository == 'bsuv/terraform-provider-namespace' && (github.event_name != 'schedule' || vars.ENABLE_NIGHTLY_ACCEPTANCE == 'true')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.7'
+          cache: true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 'latest'
+          terraform_wrapper: false
+
+      - name: Run Singleton Acceptance Tests (Serialized)
+        id: run-singleton-tests
+        env:
+          TF_ACC: "1"
+          NSC_RUN_ID: ${{ github.run_id }}-singletons
+          NSC_TOKEN: ${{ secrets.NSC_TOKEN }}
+          NSC_PARTNER_TOKEN: ${{ secrets.NSC_PARTNER_TOKEN }}
+          NSC_TRUSTED_JWT: ${{ secrets.NSC_TRUSTED_JWT }}
+          NSC_ENDPOINT: ${{ secrets.NSC_ENDPOINT }}
+          NSC_TEST_TENANT: ${{ secrets.NSC_TEST_TENANT }}
+          NSC_TEST_IMAGE_REPO: ${{ secrets.NSC_TEST_IMAGE_REPO }}
+          NSC_TEST_IMAGE_DIGEST: ${{ secrets.NSC_TEST_IMAGE_DIGEST }}
+          NSC_TEST_PAGINATED_IMAGE_REPO: ${{ secrets.NSC_TEST_PAGINATED_IMAGE_REPO }}
+          NSC_TEST_CACHE_VOLUME_TAG: ${{ secrets.NSC_TEST_CACHE_VOLUME_TAG }}
+          NSC_TEST_PV_TAG: ${{ secrets.NSC_TEST_PV_TAG }}
+          NSC_TEST_VAULT_SECRET_ID: ${{ secrets.NSC_TEST_VAULT_SECRET_ID }}
+        run: |
+          mkdir -p test-reports-singletons
+          go test -v -json -count=1 -timeout 30m ./internal/provider/... -run '^TestAccRegistryPolicy_Default$' > "${RUNNER_TEMP:-/tmp}/test-singletons.json"
+
+      - name: Generate Singleton Test Report & JUnit Artifacts
+        if: always()
+        run: |
+          bash ./scripts/generate-acceptance-report.sh \
+            --input "${RUNNER_TEMP:-/tmp}/test-singletons.json" \
+            --output-dir test-reports-singletons \
+            --commit-sha "${{ github.sha }}" \
+            --run-link "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --run-id "${{ github.run_id }}" \
+            --tf-version "latest" \
+            --suite singleton
+          cat test-reports-singletons/acceptance-report.md
+
+      - name: Archive Singleton Test Artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: acceptance-artifacts-singletons
+          path: test-reports-singletons/
+          retention-days: 14
+
+      - name: Run Guarded Post-Test Sweeper
+        if: always()
+        env:
+          TF_ACC: "1"
+          NSC_RUN_ID: ${{ github.run_id }}-singletons
+          NSC_TOKEN: ${{ secrets.NSC_TOKEN }}
+          NSC_PARTNER_TOKEN: ${{ secrets.NSC_PARTNER_TOKEN }}
+          NSC_TRUSTED_JWT: ${{ secrets.NSC_TRUSTED_JWT }}
+          NSC_ENDPOINT: ${{ secrets.NSC_ENDPOINT }}
+          NSC_TEST_TENANT: ${{ secrets.NSC_TEST_TENANT }}
+          NSC_TEST_IMAGE_REPO: ${{ secrets.NSC_TEST_IMAGE_REPO }}
+          NSC_TEST_IMAGE_DIGEST: ${{ secrets.NSC_TEST_IMAGE_DIGEST }}
+          NSC_TEST_PAGINATED_IMAGE_REPO: ${{ secrets.NSC_TEST_PAGINATED_IMAGE_REPO }}
+          NSC_TEST_CACHE_VOLUME_TAG: ${{ secrets.NSC_TEST_CACHE_VOLUME_TAG }}
+          NSC_TEST_PV_TAG: ${{ secrets.NSC_TEST_PV_TAG }}
+          NSC_TEST_VAULT_SECRET_ID: ${{ secrets.NSC_TEST_VAULT_SECRET_ID }}
+        run: go test -v -count=1 -timeout 20m ./internal/provider/... -sweep=all
