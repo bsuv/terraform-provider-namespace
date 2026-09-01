@@ -3,7 +3,7 @@ module github.com/bsuv/terraform-provider-namespace
 go 1.26.7
 
 require (
-	buf.build/gen/go/namespace/cloud/grpc/go v1.6.2-20260820164744-a1973bcf4d87.1
+	buf.build/gen/go/namespace/cloud/grpc/go v1.6.2-20260827190639-aea8e73c7087.1
 	buf.build/gen/go/namespace/cloud/protocolbuffers/go v1.36.12-20260820164744-a1973bcf4d87.1
 	github.com/hashicorp/go-plugin v1.8.0
 	github.com/hashicorp/terraform-json v0.28.0
