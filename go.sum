@@ -1,9 +1,9 @@
-buf.build/gen/go/namespace/bazel/protocolbuffers/go v1.36.12-20260717182923-633d56cd145e.1 h1:yeusUVBBPUCU30p3muCO6Fu6h6+ofN/uvhyG2ZQOQKo=
-buf.build/gen/go/namespace/bazel/protocolbuffers/go v1.36.12-20260717182923-633d56cd145e.1/go.mod h1:zxytu9g+lg+R/S7nG/trcmBcrd9KAZeHqQbgtChow7U=
+buf.build/gen/go/namespace/bazel/protocolbuffers/go v1.36.12-20260717182923-633d56cd145e.2 h1:ld7Rm3NMVEYRsSuxbnw2bv1kECoGs//0UqIwDUVoIy8=
+buf.build/gen/go/namespace/bazel/protocolbuffers/go v1.36.12-20260717182923-633d56cd145e.2/go.mod h1:zxytu9g+lg+R/S7nG/trcmBcrd9KAZeHqQbgtChow7U=
 buf.build/gen/go/namespace/cloud/grpc/go v1.6.2-20260820164744-a1973bcf4d87.1 h1:Szd8+tmae26rv8IG14gItvykV9vhFzvrBcUg47ZAVHM=
 buf.build/gen/go/namespace/cloud/grpc/go v1.6.2-20260820164744-a1973bcf4d87.1/go.mod h1:v2Fn3cyk8eT581ReENee/l/lFl1JNYMU/WspzgSjXiU=
-buf.build/gen/go/namespace/cloud/protocolbuffers/go v1.36.12-20260820164744-a1973bcf4d87.1 h1:rha4+KA9AGYPQktS1LYeHjpXDafnpoPLziO0FGhd1iw=
-buf.build/gen/go/namespace/cloud/protocolbuffers/go v1.36.12-20260820164744-a1973bcf4d87.1/go.mod h1:qZ8DAMLNpt2zvGyC5UsmblfkkKyUWbVHEkLodBFoMKg=
+buf.build/gen/go/namespace/cloud/protocolbuffers/go v1.36.12-20260831162339-f03c96d36608.2 h1:G1GcbYKmFgIa5p3trRFZTW/XrHTLJjhpvyeTkOqpcUQ=
+buf.build/gen/go/namespace/cloud/protocolbuffers/go v1.36.12-20260831162339-f03c96d36608.2/go.mod h1:IB5EzvWVDyFTQd7OUERXKlL+1pRhA4tfF7M6s7/z2WU=
 dario.cat/mergo v1.0.0 h1:AGCNq9Evsj31mOgNPcLyXc+4PNABt905YmuqPYYpBWk=
 dario.cat/mergo v1.0.0/go.mod h1:uNxQE+84aUszobStD9th8a29P2fMDhsBdgRYvZOxGmk=
 github.com/BurntSushi/toml v1.2.1 h1:9F2/+DoOYIOksmaJFPw1tGFy1eDnIJXg+UHjuD8lTak=
