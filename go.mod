@@ -4,7 +4,7 @@ go 1.26.7
 
 require (
 	buf.build/gen/go/namespace/cloud/grpc/go v1.6.2-20260820164744-a1973bcf4d87.1
-	buf.build/gen/go/namespace/cloud/protocolbuffers/go v1.36.12-20260820164744-a1973bcf4d87.1
+	buf.build/gen/go/namespace/cloud/protocolbuffers/go v1.36.12-20261001124837-78787407f237.2
 	github.com/hashicorp/go-plugin v1.8.0
 	github.com/hashicorp/terraform-json v0.28.0
 	github.com/hashicorp/terraform-plugin-docs v0.25.0
@@ -19,7 +19,7 @@ require (
 )
 
 require (
-	buf.build/gen/go/namespace/bazel/protocolbuffers/go v1.36.12-20260717182923-633d56cd145e.1 // indirect
+	buf.build/gen/go/namespace/bazel/protocolbuffers/go v1.36.12-20260717182923-633d56cd145e.2 // indirect
 	github.com/BurntSushi/toml v1.2.1 // indirect
 	github.com/Kunde21/markdownfmt/v3 v3.1.0 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
