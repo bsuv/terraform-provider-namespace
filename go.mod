@@ -6,7 +6,7 @@ require (
 	buf.build/gen/go/namespace/cloud/grpc/go v1.6.2-20260820164744-a1973bcf4d87.1
 	buf.build/gen/go/namespace/cloud/protocolbuffers/go v1.36.12-20260820164744-a1973bcf4d87.1
 	github.com/hashicorp/go-plugin v1.8.0
-	github.com/hashicorp/terraform-json v0.28.0
+	github.com/hashicorp/terraform-json v0.29.0
 	github.com/hashicorp/terraform-plugin-docs v0.25.0
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-framework-validators v0.19.0
