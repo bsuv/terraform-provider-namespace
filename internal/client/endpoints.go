@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"os"
 	"strings"
@@ -52,9 +51,9 @@ type EndpointConfig struct {
 
 // NewEndpointPool initializes a new EndpointPool with resolved endpoints.
 func NewEndpointPool(cfg EndpointConfig) (*EndpointPool, error) {
-	globalEP := strings.TrimSpace(cfg.GlobalEndpoint)
-	if globalEP == "" {
-		if envGlobal := strings.TrimSpace(os.Getenv("NSC_GLOBAL_ENDPOINT")); envGlobal != "" {
+	globalEP := cfg.GlobalEndpoint
+	if strings.TrimSpace(globalEP) == "" {
+		if envGlobal := os.Getenv("NSC_GLOBAL_ENDPOINT"); strings.TrimSpace(envGlobal) != "" {
 			globalEP = envGlobal
 		} else {
 			globalEP = DefaultGlobalEndpoint
@@ -63,10 +62,11 @@ func NewEndpointPool(cfg EndpointConfig) (*EndpointPool, error) {
 	if err := ValidateEndpoint(globalEP); err != nil {
 		return nil, fmt.Errorf("invalid global endpoint: %w", err)
 	}
+	globalEP = strings.TrimSpace(globalEP)
 
-	iamEP := strings.TrimSpace(cfg.IAMEndpoint)
-	if iamEP == "" {
-		if envIAM := strings.TrimSpace(os.Getenv("NSC_IAM_ENDPOINT")); envIAM != "" {
+	iamEP := cfg.IAMEndpoint
+	if strings.TrimSpace(iamEP) == "" {
+		if envIAM := os.Getenv("NSC_IAM_ENDPOINT"); strings.TrimSpace(envIAM) != "" {
 			iamEP = envIAM
 		} else {
 			iamEP = DefaultIAMEndpoint
@@ -75,20 +75,24 @@ func NewEndpointPool(cfg EndpointConfig) (*EndpointPool, error) {
 	if err := ValidateEndpoint(iamEP); err != nil {
 		return nil, fmt.Errorf("invalid IAM endpoint: %w", err)
 	}
+	iamEP = strings.TrimSpace(iamEP)
 
-	computeEP := strings.TrimSpace(cfg.ComputeEndpoint)
-	if computeEP == "" {
-		computeEP = strings.TrimSpace(os.Getenv("NSC_ENDPOINT"))
+	computeEP := cfg.ComputeEndpoint
+	if strings.TrimSpace(computeEP) == "" {
+		computeEP = os.Getenv("NSC_ENDPOINT")
 	}
-	if computeEP != "" {
+	if strings.TrimSpace(computeEP) != "" {
 		if err := ValidateEndpoint(computeEP); err != nil {
 			return nil, fmt.Errorf("invalid compute endpoint: %w", err)
 		}
+		computeEP = strings.TrimSpace(computeEP)
+	} else {
+		computeEP = ""
 	}
 
 	creds := cfg.Creds
 	if creds == nil {
-		creds = credentials.NewTLS(&tls.Config{})
+		creds = credentials.NewTLS(newDefaultTLSConfig())
 	}
 
 	version := cfg.Version

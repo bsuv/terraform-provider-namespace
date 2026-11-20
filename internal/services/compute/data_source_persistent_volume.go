@@ -171,7 +171,7 @@ func (d *persistentVolumeDataSource) Read(ctx context.Context, req datasource.Re
 			}
 			resp.Diagnostics.AddError(
 				"Persistent Volume Not Found",
-				fmt.Sprintf("No persistent volume found matching %s: %s", filterDesc, st.Message()),
+				fmt.Sprintf("No persistent volume found matching %s: %s", filterDesc, client.RedactSecrets(st.Message())),
 			)
 			return
 		}

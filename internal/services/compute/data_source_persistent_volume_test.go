@@ -341,3 +341,59 @@ func TestPersistentVolumeDataSource_Read_ValidationErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestPersistentVolumeDataSource_Read_NotFound_RedactsSecrets(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	bearerTok := "nsct_" + "vol_notfound_secret_12345"
+	jwtTok := "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiJ2b2x1bWUifQ." + "c2lnbmF0dXJl"
+	pemKey := testutil.SynthesizePEMBlock("PRIVATE KEY", "volume-mock-key-body")
+
+	srv.Storage.DescribePersistentVolumeFunc = func(ctx context.Context, req *computev1beta.DescribePersistentVolumeRequest) (*computev1beta.DescribePersistentVolumeResponse, error) {
+		return nil, status.Errorf(codes.NotFound, "missing volume with token %s jwt %s key %s", bearerTok, jwtTok, pemKey)
+	}
+
+	d, schemaResp := setupTestDataSourcePersistentVolume(t, srv)
+
+	cfg := compute.PersistentVolumeDataSourceModel{
+		ID:             types.StringValue("vol-missing"),
+		Tag:            types.StringNull(),
+		Site:           types.StringNull(),
+		SizeMb:         types.Int64Null(),
+		CreatedAt:      types.StringNull(),
+		DestroyedAt:    types.StringNull(),
+		AttachedTo:     types.StringNull(),
+		ReleasedAt:     types.StringNull(),
+		ReleasedReason: types.StringNull(),
+	}
+
+	configState := tfsdk.State{Schema: schemaResp.Schema}
+	if diags := configState.Set(ctx, &cfg); diags.HasError() {
+		t.Fatalf("failed to set config state: %v", diags)
+	}
+
+	req := datasource.ReadRequest{
+		Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: configState.Raw},
+	}
+	resp := &datasource.ReadResponse{
+		State: tfsdk.State{Schema: schemaResp.Schema},
+	}
+
+	d.Read(ctx, req, resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected error diagnostic for NotFound persistent volume")
+	}
+
+	detail := resp.Diagnostics.Errors()[0].Detail()
+	for _, secret := range []string{bearerTok, jwtTok, "volume-mock-key-body", "BEGIN PRIVATE KEY"} {
+		if strings.Contains(detail, secret) {
+			t.Fatalf("secret %q leaked in NotFound diagnostic detail: %s", secret, detail)
+		}
+	}
+	for _, marker := range []string{"[REDACTED TOKEN]", "[REDACTED JWT]", "[REDACTED PRIVATE KEY]"} {
+		if !strings.Contains(detail, marker) {
+			t.Errorf("expected redaction marker %q in detail: %s", marker, detail)
+		}
+	}
+}

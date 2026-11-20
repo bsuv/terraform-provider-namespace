@@ -61,9 +61,9 @@ provider "namespace" {
 
 ### Optional
 
-- `compute_endpoint` (String) Regional compute endpoint URL (e.g. `https://eu.compute.namespaceapis.com:443`).
-- `global_endpoint` (String) Override URL for global services endpoint (default: `https://global.namespaceapis.com:443`).
-- `iam_endpoint` (String) Override URL for IAM services endpoint (default: `https://iam.namespaceapis.com:443`).
+- `compute_endpoint` (String) Regional compute endpoint URL (e.g. `https://eu.compute.namespaceapis.com:443`). Only configure custom endpoints you trust: provider Bearer tokens are transmitted to the resolved host over TLS, and hosts outside Namespace domains or loopback trigger a non-blocking warning.
+- `global_endpoint` (String) Override URL for global services endpoint (default: `https://global.namespaceapis.com:443`). Only configure custom endpoints you trust: provider Bearer tokens are transmitted to the resolved host over TLS, and hosts outside Namespace domains or loopback trigger a non-blocking warning.
+- `iam_endpoint` (String) Override URL for IAM services endpoint (default: `https://iam.namespaceapis.com:443`). Only configure custom endpoints you trust: provider Bearer tokens and session-exchange requests are transmitted to the resolved host over TLS, and hosts outside Namespace domains or loopback trigger a non-blocking warning.
 - `token` (String, Sensitive) Namespace Cloud Bearer authentication token. Conflicts with `token_file`. Can also be specified via the `NSC_TOKEN` environment variable.
 - `token_file` (String) Path to a JSON file containing Namespace Cloud credentials. Conflicts with `token`. Can also be specified via the `NSC_TOKEN_FILE` environment variable.
 

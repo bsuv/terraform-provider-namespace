@@ -2,9 +2,11 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/bsuv/terraform-provider-namespace/internal/client"
+	"github.com/bsuv/terraform-provider-namespace/internal/endpoint"
 	"github.com/bsuv/terraform-provider-namespace/internal/tfutil"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -83,21 +85,21 @@ func (p *NamespaceProvider) Schema(ctx context.Context, req provider.SchemaReque
 				},
 			},
 			"global_endpoint": schema.StringAttribute{
-				Description: "Override URL for global services endpoint (default: `https://global.namespaceapis.com:443`).",
+				Description: "Override URL for global services endpoint (default: `https://global.namespaceapis.com:443`). Only configure custom endpoints you trust: provider Bearer tokens are transmitted to the resolved host over TLS, and hosts outside Namespace domains or loopback trigger a non-blocking warning.",
 				Optional:    true,
 				Validators: []validator.String{
 					tfutil.ValidEndpoint(),
 				},
 			},
 			"iam_endpoint": schema.StringAttribute{
-				Description: "Override URL for IAM services endpoint (default: `https://iam.namespaceapis.com:443`).",
+				Description: "Override URL for IAM services endpoint (default: `https://iam.namespaceapis.com:443`). Only configure custom endpoints you trust: provider Bearer tokens and session-exchange requests are transmitted to the resolved host over TLS, and hosts outside Namespace domains or loopback trigger a non-blocking warning.",
 				Optional:    true,
 				Validators: []validator.String{
 					tfutil.ValidEndpoint(),
 				},
 			},
 			"compute_endpoint": schema.StringAttribute{
-				Description: "Regional compute endpoint URL (e.g. `https://eu.compute.namespaceapis.com:443`).",
+				Description: "Regional compute endpoint URL (e.g. `https://eu.compute.namespaceapis.com:443`). Only configure custom endpoints you trust: provider Bearer tokens are transmitted to the resolved host over TLS, and hosts outside Namespace domains or loopback trigger a non-blocking warning.",
 				Optional:    true,
 				Validators: []validator.String{
 					tfutil.ValidEndpoint(),
@@ -165,6 +167,31 @@ func (p *NamespaceProvider) Configure(ctx context.Context, req provider.Configur
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to Initialize Namespace Client", client.RedactSecrets(err.Error()))
 		return
+	}
+
+	for _, ep := range []struct {
+		name  string
+		value string
+	}{
+		{name: "global_endpoint", value: cli.GlobalEndpoint()},
+		{name: "iam_endpoint", value: cli.IAMEndpoint()},
+		{name: "compute_endpoint", value: cli.ComputeEndpoint()},
+	} {
+		if ep.value != "" && !endpoint.IsTrustedHost(ep.value) {
+			resp.Diagnostics.AddWarning(
+				"Custom Untrusted Endpoint Configured",
+				client.RedactSecrets(fmt.Sprintf(
+					"Resolved %s (%q) points outside trusted Namespace domains (namespaceapis.com, namespace.so, namespacelabs.dev) and loopback addresses. Provider Bearer credentials will be transmitted to this host over TLS; verify you trust this endpoint or proxy.",
+					ep.name, ep.value,
+				)),
+			)
+		}
+	}
+
+	if tokenFilePath := cli.TokenFilePath(); tokenFilePath != "" {
+		if warn := client.CheckTokenFilePermissions(tokenFilePath); warn != "" {
+			resp.Diagnostics.AddWarning("Overly Permissive Token File Permissions", client.RedactSecrets(warn))
+		}
 	}
 
 	resp.DataSourceData = cli

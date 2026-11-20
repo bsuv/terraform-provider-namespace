@@ -140,7 +140,7 @@ func (d *registryImageDataSource) Read(ctx context.Context, req datasource.ReadR
 		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
 			resp.Diagnostics.AddError(
 				"Registry Image Not Found",
-				fmt.Sprintf("No registry image found for %s:%s: %s", repo, ref, st.Message()),
+				fmt.Sprintf("No registry image found for %s:%s: %s", repo, ref, client.RedactSecrets(st.Message())),
 			)
 			return
 		}

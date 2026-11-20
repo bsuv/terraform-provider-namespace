@@ -208,3 +208,58 @@ func TestRegistryImageDataSource_Read_NotFound(t *testing.T) {
 		t.Errorf("expected summary containing 'Registry Image Not Found', got %q", errMsg)
 	}
 }
+
+func TestRegistryImageDataSource_Read_NotFound_RedactsSecrets(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	bearerTok := "nsct_" + "registry_notfound_secret_12345"
+	jwtTok := "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiJyZWdpc3RyeSJ9." + "c2lnbmF0dXJl"
+	pemKey := testutil.SynthesizePEMBlock("RSA PRIVATE KEY", "registry-mock-key-body")
+
+	srv.Registry.GetImageFunc = func(ctx context.Context, req *registryv1beta.GetImageRequest) (*registryv1beta.GetImageResponse, error) {
+		return nil, status.Errorf(codes.NotFound, "lookup failed with token %s jwt %s key %s", bearerTok, jwtTok, pemKey)
+	}
+
+	d, schemaResp := setupTestDataSourceRegistryImage(t, srv)
+
+	cfg := registry.RegistryImageDataSourceModel{
+		ID:         types.StringNull(),
+		Repository: types.StringValue("my-app"),
+		Reference:  types.StringValue("v1"),
+		Digest:     types.StringNull(),
+		CreatedAt:  types.StringNull(),
+		ExpiresAt:  types.StringNull(),
+		SizeBytes:  types.Int64Null(),
+		Tags:       nil,
+	}
+
+	configState := tfsdk.State{Schema: schemaResp.Schema}
+	if diags := configState.Set(ctx, &cfg); diags.HasError() {
+		t.Fatalf("failed to set config state: %v", diags)
+	}
+
+	req := datasource.ReadRequest{
+		Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: configState.Raw},
+	}
+	resp := &datasource.ReadResponse{
+		State: tfsdk.State{Schema: schemaResp.Schema},
+	}
+
+	d.Read(ctx, req, resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected error diagnostic for NotFound image")
+	}
+
+	detail := resp.Diagnostics.Errors()[0].Detail()
+	for _, secret := range []string{bearerTok, jwtTok, "registry-mock-key-body", "BEGIN RSA PRIVATE KEY"} {
+		if strings.Contains(detail, secret) {
+			t.Fatalf("secret %q leaked in NotFound diagnostic detail: %s", secret, detail)
+		}
+	}
+	for _, marker := range []string{"[REDACTED TOKEN]", "[REDACTED JWT]", "[REDACTED PRIVATE KEY]"} {
+		if !strings.Contains(detail, marker) {
+			t.Errorf("expected redaction marker %q in detail: %s", marker, detail)
+		}
+	}
+}

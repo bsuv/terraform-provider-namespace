@@ -337,3 +337,55 @@ func TestCacheVolumeSummaryDataSource_Read_GenerationsDeterministicSort(t *testi
 		t.Errorf("expected index 2 to be gen-c, got %q", state.Generations[2].ID.ValueString())
 	}
 }
+
+func TestCacheVolumeSummaryDataSource_Read_NotFound_RedactsSecrets(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	bearerTok := "nsct_" + "cache_notfound_secret_12345"
+	jwtTok := "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiJjYWNoZSJ9." + "c2lnbmF0dXJl"
+	pemKey := testutil.SynthesizePEMBlock("EC PRIVATE KEY", "cache-mock-key-body")
+
+	srv.Storage.GetVolumeTagSummaryFunc = func(ctx context.Context, req *computev1beta.GetVolumeTagSummaryRequest) (*computev1beta.GetVolumeTagSummaryResponse, error) {
+		return nil, status.Errorf(codes.NotFound, "missing tag with token %s jwt %s key %s", bearerTok, jwtTok, pemKey)
+	}
+
+	d, schemaResp := setupTestDataSourceCacheVolumeSummary(t, srv)
+
+	cfg := compute.CacheVolumeSummaryDataSourceModel{
+		ID:          types.StringNull(),
+		Tag:         types.StringValue("missing-tag"),
+		SizeMb:      types.Int64Null(),
+		CreatedAt:   types.StringNull(),
+		Generations: nil,
+	}
+
+	configState := tfsdk.State{Schema: schemaResp.Schema}
+	if diags := configState.Set(ctx, &cfg); diags.HasError() {
+		t.Fatalf("failed to set config state: %v", diags)
+	}
+
+	req := datasource.ReadRequest{
+		Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: configState.Raw},
+	}
+	resp := &datasource.ReadResponse{
+		State: tfsdk.State{Schema: schemaResp.Schema},
+	}
+
+	d.Read(ctx, req, resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected error diagnostic for NotFound cache volume summary")
+	}
+
+	detail := resp.Diagnostics.Errors()[0].Detail()
+	for _, secret := range []string{bearerTok, jwtTok, "cache-mock-key-body", "BEGIN EC PRIVATE KEY"} {
+		if strings.Contains(detail, secret) {
+			t.Fatalf("secret %q leaked in NotFound diagnostic detail: %s", secret, detail)
+		}
+	}
+	for _, marker := range []string{"[REDACTED TOKEN]", "[REDACTED JWT]", "[REDACTED PRIVATE KEY]"} {
+		if !strings.Contains(detail, marker) {
+			t.Errorf("expected redaction marker %q in detail: %s", marker, detail)
+		}
+	}
+}

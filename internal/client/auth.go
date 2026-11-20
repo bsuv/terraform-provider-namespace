@@ -2,13 +2,14 @@ package client
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -61,16 +62,16 @@ type SessionTokenSource struct {
 
 // NewSessionTokenSource creates a new SessionTokenSource targeting the given IAM endpoint.
 func NewSessionTokenSource(sessionToken, iamEndpoint string, creds credentials.TransportCredentials, dialOpts ...grpc.DialOption) *SessionTokenSource {
-	ep := strings.TrimSpace(iamEndpoint)
-	if ep == "" {
-		if envIAM := strings.TrimSpace(os.Getenv("NSC_IAM_ENDPOINT")); envIAM != "" {
-			ep = envIAM
+	ep := strings.Trim(iamEndpoint, " ")
+	if strings.TrimSpace(iamEndpoint) == "" {
+		if envIAM := os.Getenv("NSC_IAM_ENDPOINT"); strings.TrimSpace(envIAM) != "" {
+			ep = strings.Trim(envIAM, " ")
 		} else {
 			ep = DefaultIAMEndpoint
 		}
 	}
 	if creds == nil {
-		creds = credentials.NewTLS(&tls.Config{})
+		creds = credentials.NewTLS(newDefaultTLSConfig())
 	}
 	var optsCopy []grpc.DialOption
 	if len(dialOpts) > 0 {
@@ -169,16 +170,16 @@ type LocalTokenSource struct {
 
 // NewLocalTokenSource creates a new LocalTokenSource for a file path, isolating IAM exchanges to iamEndpoint.
 func NewLocalTokenSource(filePath, iamEndpoint string, creds credentials.TransportCredentials, dialOpts ...grpc.DialOption) *LocalTokenSource {
-	ep := strings.TrimSpace(iamEndpoint)
-	if ep == "" {
-		if envIAM := strings.TrimSpace(os.Getenv("NSC_IAM_ENDPOINT")); envIAM != "" {
-			ep = envIAM
+	ep := strings.Trim(iamEndpoint, " ")
+	if strings.TrimSpace(iamEndpoint) == "" {
+		if envIAM := os.Getenv("NSC_IAM_ENDPOINT"); strings.TrimSpace(envIAM) != "" {
+			ep = strings.Trim(envIAM, " ")
 		} else {
 			ep = DefaultIAMEndpoint
 		}
 	}
 	if creds == nil {
-		creds = credentials.NewTLS(&tls.Config{})
+		creds = credentials.NewTLS(newDefaultTLSConfig())
 	}
 	var optsCopy []grpc.DialOption
 	if len(dialOpts) > 0 {
@@ -208,7 +209,7 @@ func (l *LocalTokenSource) IssueToken(ctx context.Context, minDuration time.Dura
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	data, err := os.ReadFile(l.filePath)
+	data, _, err := readBoundedTokenFile(l.filePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read token file %q: %w", l.filePath, err)
 	}
@@ -264,13 +265,60 @@ func (l *LocalTokenSource) Close() error {
 	return nil
 }
 
+const maxTokenFileBytes = 1 << 20
+
 type tokenFilePayload struct {
 	BearerToken  string `json:"bearer_token"`
 	SessionToken string `json:"session_token"`
 }
 
+func readBoundedTokenFile(filePath string) ([]byte, os.FileInfo, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if fi.IsDir() {
+		return nil, fi, fmt.Errorf("path %q is a directory", filePath)
+	}
+	if fi.Size() > maxTokenFileBytes {
+		return nil, fi, fmt.Errorf("token file %q exceeds maximum allowed size of %d bytes", filePath, maxTokenFileBytes)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileBytes+1))
+	if err != nil {
+		return nil, fi, err
+	}
+	if len(data) > maxTokenFileBytes {
+		return nil, fi, fmt.Errorf("token file %q exceeds maximum allowed size of %d bytes", filePath, maxTokenFileBytes)
+	}
+	return data, fi, nil
+}
+
+// CheckTokenFilePermissions inspects filePath permissions on Unix platforms and
+// returns a warning message if group or world permission bits are set.
+func CheckTokenFilePermissions(filePath string) string {
+	if runtime.GOOS == "windows" || strings.TrimSpace(filePath) == "" {
+		return ""
+	}
+	fi, err := os.Stat(filePath)
+	if err != nil || fi.IsDir() {
+		return ""
+	}
+	mode := fi.Mode().Perm()
+	if mode&0o077 != 0 {
+		return fmt.Sprintf("Token file %q has overly permissive mode %04o; restrict permissions to 0600 (owner read/write only) to protect credentials from other local users.", filePath, mode)
+	}
+	return ""
+}
+
 func validateTokenFile(filePath, label string) error {
-	data, err := os.ReadFile(filePath)
+	data, _, err := readBoundedTokenFile(filePath)
 	if err != nil {
 		return fmt.Errorf("%s %q is unreadable: %w", label, filePath, err)
 	}
@@ -333,10 +381,10 @@ func loadDefaultTokenSource(iamEndpoint string, creds credentials.TransportCrede
 // 4. Environment variable `NSC_TOKEN_FILE`
 // 5. Fallback default credentials (workload token `/var/run/nsc/token.json` then user token `~/.config/ns/token.json`)
 func ResolveTokenSource(ctx context.Context, cfg AuthConfig) (api.TokenSource, error) {
-	iamEP := strings.TrimSpace(cfg.IAMEndpoint)
-	if iamEP == "" {
-		if envIAM := strings.TrimSpace(os.Getenv("NSC_IAM_ENDPOINT")); envIAM != "" {
-			iamEP = envIAM
+	iamEP := strings.Trim(cfg.IAMEndpoint, " ")
+	if strings.TrimSpace(cfg.IAMEndpoint) == "" {
+		if envIAM := os.Getenv("NSC_IAM_ENDPOINT"); strings.TrimSpace(envIAM) != "" {
+			iamEP = strings.Trim(envIAM, " ")
 		} else {
 			iamEP = DefaultIAMEndpoint
 		}
@@ -385,6 +433,17 @@ func decodeBase64URL(seg string) ([]byte, error) {
 	return base64.URLEncoding.DecodeString(seg)
 }
 
+func isInlineToken(s string) bool {
+	if strings.HasPrefix(s, "nsct_") ||
+		strings.HasPrefix(s, "st_") ||
+		strings.HasPrefix(s, "nscw_") ||
+		strings.HasPrefix(s, "nscu_") ||
+		strings.HasPrefix(s, "tok_") {
+		return true
+	}
+	return strings.HasPrefix(s, "eyJ") && len(strings.Split(s, ".")) == 3
+}
+
 // ResolveTenantFromToken resolves the tenant identity from a given token string or token file path.
 // It supports:
 // 1. Pinned SDK claims parser for nsct_<JWT>, st_<JWT>, and nscw_<JWT> tokens.
@@ -399,30 +458,32 @@ func ResolveTenantFromToken(tokenOrPath string) (string, error) {
 		return "", fmt.Errorf("token cannot be empty")
 	}
 
-	// If tokenOrPath is a valid file path on disk, load the token from the file
-	if fi, err := os.Stat(tokenStr); err == nil && !fi.IsDir() {
-		data, err := os.ReadFile(tokenStr)
-		if err != nil {
-			return "", fmt.Errorf("failed to read token file %q: %w", tokenStr, err)
-		}
-		trimmed := strings.TrimSpace(string(data))
-		if len(trimmed) == 0 {
-			return "", fmt.Errorf("token file %q is empty", tokenStr)
-		}
-		var payload tokenFilePayload
-		if err := json.Unmarshal(data, &payload); err == nil {
-			if strings.TrimSpace(payload.BearerToken) != "" {
-				tokenStr = strings.TrimSpace(payload.BearerToken)
-			} else if strings.TrimSpace(payload.SessionToken) != "" {
-				tokenStr = strings.TrimSpace(payload.SessionToken)
+	// Check inline token prefixes before probing the filesystem so raw credentials never trigger os.Stat.
+	if !isInlineToken(tokenStr) {
+		if fi, err := os.Stat(tokenStr); err == nil && !fi.IsDir() {
+			data, _, err := readBoundedTokenFile(tokenStr)
+			if err != nil {
+				return "", fmt.Errorf("failed to read token file %q: %w", tokenStr, err)
+			}
+			trimmed := strings.TrimSpace(string(data))
+			if len(trimmed) == 0 {
+				return "", fmt.Errorf("token file %q is empty", tokenStr)
+			}
+			var payload tokenFilePayload
+			if err := json.Unmarshal(data, &payload); err == nil {
+				if strings.TrimSpace(payload.BearerToken) != "" {
+					tokenStr = strings.TrimSpace(payload.BearerToken)
+				} else if strings.TrimSpace(payload.SessionToken) != "" {
+					tokenStr = strings.TrimSpace(payload.SessionToken)
+				} else {
+					tokenStr = trimmed
+				}
 			} else {
 				tokenStr = trimmed
 			}
-		} else {
-			tokenStr = trimmed
-		}
-		if tokenStr == "" {
-			return "", fmt.Errorf("token file %q is empty", tokenOrPath)
+			if tokenStr == "" {
+				return "", fmt.Errorf("token file %q is empty", tokenOrPath)
+			}
 		}
 	}
 

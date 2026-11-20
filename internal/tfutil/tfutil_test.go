@@ -159,6 +159,41 @@ func TestDiagnostics(t *testing.T) {
 			t.Fatalf("expected false and 1 diag for generic error, got %v, %d", notFound, len(diags4))
 		}
 	})
+
+	t.Run("SecretRedaction", func(t *testing.T) {
+		bearerTok := "nsct_" + "secret_tfutil_token_12345"
+		jwtTok := "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiIxMjMifQ." + "c2lnbmF0dXJl"
+		pemKey := "-----" + "BEGIN RSA PRIVATE KEY-----\nmock-key-data\n" + "-----" + "END RSA PRIVATE KEY-----"
+
+		var diags diag.Diagnostics
+		AddError(&diags, "Error with "+bearerTok, "Detail with "+pemKey)
+		AddErrorf(&diags, "Fmt "+jwtTok, "Authorization: Bearer %s", bearerTok)
+		AddErrorDiag(&diags, "Diag "+bearerTok, errors.New("failed with "+jwtTok))
+		AddWarning(&diags, "Warn "+bearerTok, "Warn detail "+jwtTok)
+		AddWarningf(&diags, "WarnFmt "+jwtTok, "password=%s", "supersecretpass")
+		AddAttributeError(&diags, path.Root("attr"), "Attr "+bearerTok, "Attr detail "+pemKey)
+		AddAttributeErrorf(&diags, path.Root("attr"), "AttrFmt "+jwtTok, "token=%s", bearerTok)
+		AddAttributeWarning(&diags, path.Root("attr"), "AttrWarn "+bearerTok, "AttrWarn detail "+jwtTok)
+		AddAttributeWarningf(&diags, path.Root("attr"), "AttrWarnFmt "+jwtTok, "secret=%s", "supersecret")
+
+		notFound := HandleGRPCError(&diags, status.Error(codes.Internal, "status "+bearerTok+" "+pemKey), "read", "target-"+jwtTok)
+		if notFound {
+			t.Fatal("expected notFound=false for codes.Internal")
+		}
+		notFound = HandleGRPCError(&diags, errors.New("plain "+bearerTok+" "+jwtTok), "read", "target")
+		if notFound {
+			t.Fatal("expected notFound=false for generic error")
+		}
+
+		for i, d := range diags {
+			combined := d.Summary() + "\n" + d.Detail()
+			for _, secret := range []string{bearerTok, jwtTok, "mock-key-data", "supersecretpass", "supersecret", "BEGIN RSA PRIVATE KEY"} {
+				if strings.Contains(combined, secret) {
+					t.Errorf("diagnostic %d leaked unredacted secret %q: summary=%q detail=%q", i, secret, d.Summary(), d.Detail())
+				}
+			}
+		}
+	})
 }
 
 // --- Pagination Tests ---
@@ -659,6 +694,11 @@ func TestValidators(t *testing.T) {
 			"https://iam.namespaceapis.com/api",
 			"eu.compute.namespaceapis.com:443/path",
 			"global.namespaceapis.com/some/path",
+			"https://global.namespaceapis.com\n",
+			"https://169.254.169.254",
+			"https://0.0.0.0:443",
+			"https://[fe80::1]:443",
+			"https://[fd00:ec2::254]:443",
 		}
 		for _, ep := range invalidEndpoints {
 			var resp validator.StringResponse

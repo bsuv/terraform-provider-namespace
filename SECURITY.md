@@ -41,5 +41,34 @@ While ephemeral resources prevent credentials from entering state, managed resou
 ### Credential Handling & Redaction Boundaries
 - Never commit literal tokens into Terraform HCL files (`.tf`).
 - Use environment variables (`NSC_TOKEN`), token files (`NSC_TOKEN_FILE`), or Terraform 1.11 ephemeral sensitive input variables (`ephemeral = true`, `sensitive = true`).
-- **Automated Provider Redaction**: The provider automatically redacts authorization headers, bearer tokens (`nsct_...`, `nscw_...`), JWTs, private keys (RSA, EC, OpenSSH, PKCS#8), client certificates, passwords/passphrases, and opaque values stored under credential-like structured fields. Redaction covers ordinary and JSON-escaped provider errors, diagnostics, gRPC interceptor logs, and generated acceptance-test reports.
+- **Automated Provider Redaction**: The provider automatically redacts authorization headers, bearer tokens (`nsct_...`, `nscw_...`, `nscu_...`, `tok_...`, `st_...`), JWTs, private keys (RSA, EC, OpenSSH, PKCS#8), client certificates, passwords/passphrases, and opaque values stored under credential-like structured fields. Redaction covers ordinary and JSON-escaped provider errors, shared `internal/tfutil` diagnostics, custom `NotFound` data-source handlers, gRPC interceptor logs, and generated acceptance-test reports.
 - **Operator Redaction Boundaries**: Operators remain responsible for protecting data outside the provider runtime boundary, including CI/CD runner terminal output buffers, unredacted Terraform CLI output blocks (`terraform output`), local `.tfvars` files, OS process environment dumps, and external CLI execution wrappers.
+
+---
+
+## Transport, Endpoint & Token File Hardening
+
+### Endpoint & Proxy Trust Boundaries
+- Custom endpoint overrides (`global_endpoint`, `iam_endpoint`, `compute_endpoint`, and environment variables `NSC_GLOBAL_ENDPOINT`, `NSC_IAM_ENDPOINT`, `NSC_ENDPOINT`) are **security-sensitive trust boundaries**.
+- The provider transmits `Authorization: Bearer <token>` credentials and session-exchange requests over TLS to the resolved endpoint host. Never point provider endpoints at untrusted third-party servers or untrusted environment overrides.
+- Trusted Namespace domains are `namespaceapis.com` (`*.namespaceapis.com`), `namespace.so` (`*.namespace.so`), and `namespacelabs.dev` (`*.namespacelabs.dev`). Loopback addresses (`localhost`, `127.0.0.1`, `::1`) are permitted for local test harnesses.
+- When any explicitly configured or environment-resolved endpoint resolves outside trusted Namespace domains and loopback addresses, the provider emits a **non-blocking configuration warning** (`Warning`) alerting the operator that credentials will be sent to a custom host.
+
+### Metadata SSRF & Malformed Endpoint Protections
+- Endpoint validation enforces `https://` (or bare `host[:port]` dialed over TLS) and rejects `http://` or non-HTTPS schemes, userinfo/credentials (`user:pass@`), URL paths, query strings, and fragments.
+- Raw endpoint strings containing ASCII control characters (`< 0x20`, `0x7f`) or embedded whitespace are rejected.
+- To mitigate Server-Side Request Forgery (SSRF) against cloud instance metadata services and ambiguous bind targets, endpoint validation rejects:
+  - Unspecified IP addresses (`0.0.0.0`, `::`, and IPv4-mapped `::ffff:0.0.0.0`)
+  - IPv4 link-local and cloud metadata addresses (`169.254.0.0/16`, including `169.254.169.254` and IPv4-mapped forms)
+  - IPv6 link-local addresses (`fe80::/10`, including zoned addresses)
+  - AWS IPv6 EC2 instance metadata (`fd00:ec2::254`)
+- Loopback hosts (`localhost`, `127.0.0.1`, `::1`), private test/enterprise proxy hosts, and valid custom domain hostnames remain allowed.
+
+### TLS 1.2+ Floor & Per-Connection Transport Security
+- All default gRPC connections (Global, IAM, Compute, and session-token exchange clients) explicitly require `tls.VersionTLS12` (`MinVersion: tls.VersionTLS12`) via a shared TLS configuration helper rather than relying on mutable runtime defaults.
+- Per-RPC Bearer credential enforcement (`RequireTransportSecurity()`) is scoped per connection rather than via a process-wide exported toggle: TLS connections always require transport security, and insecure transport is permitted only when an in-memory test harness explicitly injects `insecure.NewCredentials()` alongside `grpcapi.RequireTransportSecurity = false`.
+
+### Token File Permissions & Size Caps
+- Token files (`token_file`, `NSC_TOKEN_FILE`, default credential discovery paths, and acceptance-test tenant checks) are opened with `os.Open`, inspected via `Stat()`, and read through `io.LimitReader` with a strict **1 MiB (`1 << 20` bytes)** cap. Files exceeding 1 MiB fail closed with an explicit size-limit error.
+- Inline token strings (`nsct_`, `st_`, `nscw_`, `nscu_`, `tok_`, and 3-part `eyJ...` JWTs) are matched before filesystem inspection so raw tokens never probe `os.Stat`.
+- Token files on Unix systems should be restricted to owner-only permissions (`0600` or `0400`). If an active file-backed token source has group or world permission bits set (`mode & 0o077 != 0`), the provider emits a **non-blocking configuration warning** recommending `chmod 600`.

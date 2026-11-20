@@ -228,7 +228,7 @@ func (v *validEndpointValidator) ValidateString(_ context.Context, req validator
 		return
 	}
 
-	val := strings.TrimSpace(req.ConfigValue.ValueString())
+	val := req.ConfigValue.ValueString()
 	if err := endpointutil.Validate(val); err != nil {
 		resp.Diagnostics.AddAttributeError(
 			req.Path,

@@ -4,82 +4,83 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bsuv/terraform-provider-namespace/internal/redact"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// AddError appends an error diagnostic to the diagnostics slice.
+// AddError appends a redacted error diagnostic to the diagnostics slice.
 func AddError(diags *diag.Diagnostics, summary, detail string) {
 	if diags == nil {
 		return
 	}
-	diags.AddError(summary, detail)
+	diags.AddError(redact.Secrets(summary), redact.Secrets(detail))
 }
 
-// AddErrorf appends a formatted error diagnostic to the diagnostics slice.
+// AddErrorf appends a formatted, redacted error diagnostic to the diagnostics slice.
 func AddErrorf(diags *diag.Diagnostics, summary, format string, args ...any) {
 	if diags == nil {
 		return
 	}
-	diags.AddError(summary, fmt.Sprintf(format, args...))
+	diags.AddError(redact.Secrets(summary), redact.Secrets(fmt.Sprintf(format, args...)))
 }
 
-// AddErrorDiag appends an error diagnostic if err is not nil.
+// AddErrorDiag appends a redacted error diagnostic if err is not nil.
 func AddErrorDiag(diags *diag.Diagnostics, summary string, err error) {
 	if diags == nil || err == nil {
 		return
 	}
-	diags.AddError(summary, err.Error())
+	diags.AddError(redact.Secrets(summary), redact.Secrets(err.Error()))
 }
 
-// AddWarning appends a warning diagnostic to the diagnostics slice.
+// AddWarning appends a redacted warning diagnostic to the diagnostics slice.
 func AddWarning(diags *diag.Diagnostics, summary, detail string) {
 	if diags == nil {
 		return
 	}
-	diags.AddWarning(summary, detail)
+	diags.AddWarning(redact.Secrets(summary), redact.Secrets(detail))
 }
 
-// AddWarningf appends a formatted warning diagnostic to the diagnostics slice.
+// AddWarningf appends a formatted, redacted warning diagnostic to the diagnostics slice.
 func AddWarningf(diags *diag.Diagnostics, summary, format string, args ...any) {
 	if diags == nil {
 		return
 	}
-	diags.AddWarning(summary, fmt.Sprintf(format, args...))
+	diags.AddWarning(redact.Secrets(summary), redact.Secrets(fmt.Sprintf(format, args...)))
 }
 
-// AddAttributeError appends an attribute-scoped error diagnostic.
+// AddAttributeError appends a redacted attribute-scoped error diagnostic.
 func AddAttributeError(diags *diag.Diagnostics, p path.Path, summary, detail string) {
 	if diags == nil {
 		return
 	}
-	diags.AddAttributeError(p, summary, detail)
+	diags.AddAttributeError(p, redact.Secrets(summary), redact.Secrets(detail))
 }
 
-// AddAttributeErrorf appends a formatted attribute-scoped error diagnostic.
+// AddAttributeErrorf appends a formatted, redacted attribute-scoped error diagnostic.
 func AddAttributeErrorf(diags *diag.Diagnostics, p path.Path, summary, format string, args ...any) {
 	if diags == nil {
 		return
 	}
-	diags.AddAttributeError(p, summary, fmt.Sprintf(format, args...))
+	diags.AddAttributeError(p, redact.Secrets(summary), redact.Secrets(fmt.Sprintf(format, args...)))
 }
 
-// AddAttributeWarning appends an attribute-scoped warning diagnostic.
+// AddAttributeWarning appends a redacted attribute-scoped warning diagnostic.
 func AddAttributeWarning(diags *diag.Diagnostics, p path.Path, summary, detail string) {
 	if diags == nil {
 		return
 	}
-	diags.AddAttributeWarning(p, summary, detail)
+	diags.AddAttributeWarning(p, redact.Secrets(summary), redact.Secrets(detail))
 }
 
-// AddAttributeWarningf appends a formatted attribute-scoped warning diagnostic.
+// AddAttributeWarningf appends a formatted, redacted attribute-scoped warning diagnostic.
 func AddAttributeWarningf(diags *diag.Diagnostics, p path.Path, summary, format string, args ...any) {
 	if diags == nil {
 		return
 	}
-	diags.AddAttributeWarning(p, summary, fmt.Sprintf(format, args...))
+	diags.AddAttributeWarning(p, redact.Secrets(summary), redact.Secrets(fmt.Sprintf(format, args...)))
 }
 
 // HasError returns true if the diagnostics contain at least one error.
@@ -124,7 +125,7 @@ func HandleGRPCError(diags *diag.Diagnostics, err error, action, target string) 
 		if ok {
 			detail = fmt.Sprintf("gRPC error [%s]: %s", st.Code(), st.Message())
 		}
-		diags.AddError(summary, detail)
+		diags.AddError(redact.Secrets(summary), redact.Secrets(detail))
 	}
 
 	return false

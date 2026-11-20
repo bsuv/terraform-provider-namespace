@@ -182,7 +182,7 @@ func (d *cacheVolumeSummaryDataSource) Read(ctx context.Context, req datasource.
 		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
 			resp.Diagnostics.AddError(
 				"Cache Volume Tag Summary Not Found",
-				fmt.Sprintf("No cache volume summary found for tag %q: %s", tag, st.Message()),
+				fmt.Sprintf("No cache volume summary found for tag %q: %s", tag, client.RedactSecrets(st.Message())),
 			)
 			return
 		}

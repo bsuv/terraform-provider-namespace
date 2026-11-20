@@ -2,7 +2,7 @@ package client
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"

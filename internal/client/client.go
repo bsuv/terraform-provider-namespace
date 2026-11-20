@@ -79,6 +79,17 @@ func (c *Client) Pool() *EndpointPool {
 	return c.pool
 }
 
+// TokenFilePath returns the filesystem path of the active file-backed token source, or "".
+func (c *Client) TokenFilePath() string {
+	if c == nil {
+		return ""
+	}
+	if lts, ok := c.tokenSource.(*LocalTokenSource); ok {
+		return lts.FilePath()
+	}
+	return ""
+}
+
 // GlobalEndpoint returns the configured or resolved Global endpoint URL.
 func (c *Client) GlobalEndpoint() string {
 	if c.pool != nil {

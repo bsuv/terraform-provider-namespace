@@ -31,11 +31,15 @@ var (
 	// DebugShowResponses forces response payload logging when debug is active.
 	DebugShowResponses bool
 
-	// RequireTransportSecurity controls whether transport security is required for per-RPC credentials.
-	RequireTransportSecurity = true
-
 	defaultStderrWriter = NewSynchronizedRedactingWriter(nil)
 )
+
+// newDefaultTLSConfig returns the provider's baseline TLS configuration enforcing TLS 1.2+.
+func newDefaultTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+}
 
 // SynchronizedRedactingWriter wraps an io.Writer and ensures that all writes are passed
 // through RedactSecrets and synchronized under a mutex for complete concurrency safety.
@@ -175,8 +179,10 @@ func NewConnectionWithEndpointWithTransportCredentials(
 	}
 
 	if creds == nil {
-		creds = credentials.NewTLS(&tls.Config{})
+		creds = credentials.NewTLS(newDefaultTLSConfig())
 	}
+
+	allowInsecure := shouldAllowInsecurePerRPCCreds(creds)
 
 	ourOpts := []grpc.DialOption{
 		grpc.WithUserAgent(fmt.Sprintf("nsc-go/%s", nsc.Version)),
@@ -184,7 +190,10 @@ func NewConnectionWithEndpointWithTransportCredentials(
 	}
 
 	if token != nil {
-		ourOpts = append(ourOpts, grpc.WithPerRPCCredentials(tokenCredWrapper{token: token}))
+		ourOpts = append(ourOpts, grpc.WithPerRPCCredentials(tokenCredWrapper{
+			token:         token,
+			allowInsecure: allowInsecure,
+		}))
 	}
 
 	DebugWriterMutex.RLock()
@@ -217,10 +226,10 @@ func NewConnectionWithEndpointWithTransportCredentials(
 
 // ParseGRPCEndpoint parses and validates an endpoint target for gRPC dialing.
 func ParseGRPCEndpoint(endpoint string) (string, error) {
-	value := strings.TrimSpace(endpoint)
-	if err := ValidateEndpoint(value); err != nil {
+	if err := ValidateEndpoint(endpoint); err != nil {
 		return "", err
 	}
+	value := strings.TrimSpace(endpoint)
 
 	parseValue := value
 	if !strings.HasPrefix(strings.ToLower(value), "https://") {
@@ -238,7 +247,12 @@ func ParseGRPCEndpoint(endpoint string) (string, error) {
 }
 
 type tokenCredWrapper struct {
-	token api.TokenSource
+	token         api.TokenSource
+	allowInsecure bool
+}
+
+func shouldAllowInsecurePerRPCCreds(creds credentials.TransportCredentials) bool {
+	return creds != nil && creds.Info().SecurityProtocol == "insecure" && !grpcapi.RequireTransportSecurity
 }
 
 func (t tokenCredWrapper) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
@@ -251,8 +265,8 @@ func (t tokenCredWrapper) GetRequestMetadata(ctx context.Context, uri ...string)
 	}, nil
 }
 
-func (tokenCredWrapper) RequireTransportSecurity() bool {
-	return RequireTransportSecurity && grpcapi.RequireTransportSecurity
+func (t tokenCredWrapper) RequireTransportSecurity() bool {
+	return !t.allowInsecure
 }
 
 func parseEnvBool(key string) bool {
