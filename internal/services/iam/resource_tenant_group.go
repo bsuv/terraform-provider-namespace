@@ -138,9 +138,10 @@ func (r *tenantGroupResource) Create(ctx context.Context, req resource.CreateReq
 		Name: name,
 	})
 	if err == nil && existing != nil {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Tenant Group Already Exists",
-			fmt.Sprintf("A tenant group named %q already exists remotely. To manage it with Terraform, run: terraform import namespace_tenant_group.%s %s", name, name, name),
+			"A tenant group named %q already exists remotely. To manage it with Terraform, run: terraform import namespace_tenant_group.%s %s", name, name, name,
 		)
 		return
 	} else if err != nil && !client.IsNotFound(err) {
@@ -299,9 +300,10 @@ func (r *tenantGroupResource) Delete(ctx context.Context, req resource.DeleteReq
 			return
 		}
 		if client.IsFailedPrecondition(err) {
-			resp.Diagnostics.AddError(
+			tfutil.AddErrorf(
+				&resp.Diagnostics,
 				"Cannot Delete Tenant Group With Enrolled Tenants",
-				client.RedactSecrets(fmt.Sprintf("Namespace rejected deletion of tenant group %q because a precondition was not satisfied: %v. Unenroll all tenants from the group, refresh, and retry destroy.", name, err)),
+				"Namespace rejected deletion of tenant group %q because a precondition was not satisfied: %v. Unenroll all tenants from the group, refresh, and retry destroy.", name, err,
 			)
 			return
 		}
@@ -322,7 +324,7 @@ func (r *tenantGroupResource) ImportState(ctx context.Context, req resource.Impo
 	})
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.Diagnostics.AddError("Resource Not Found", fmt.Sprintf("No tenant group found with name %q", importID))
+			tfutil.AddErrorf(&resp.Diagnostics, "Resource Not Found", "No tenant group found with name %q", importID)
 			return
 		}
 		client.HandleGRPCError(ctx, err, &resp.Diagnostics, "read", "namespace_tenant_group")

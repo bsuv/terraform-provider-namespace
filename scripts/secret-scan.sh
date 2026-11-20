@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-EXPECTED_GITLEAKS_VERSION="8.30.0"
+EXPECTED_GITLEAKS_VERSION="8.30.1"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GITLEAKS_CONFIG="${REPO_ROOT}/.gitleaks.toml"
 GITLEAKS_IGNORE="${REPO_ROOT}/.gitleaksignore"
@@ -117,12 +117,18 @@ scan_working_tree \
   -e '(nsct|nscw|nscu|tok|st)_eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}' \
   -e '(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}([^A-Za-z0-9_-]|$)'
 
+# Ensure allowlisted local metadata directories are never tracked in Git.
+if [[ -n "$(git -C "${REPO_ROOT}" ls-files .agents)" ]]; then
+  echo "Error: .agents/ contains tracked files; refuse to skip secret scanning on tracked paths." >&2
+  failed=1
+fi
+
 # Static private-key fixtures are forbidden even in tests. Tests synthesize PEM
 # framing at runtime so complete key blocks never enter source or Git history.
 scan_working_tree \
   'private-key scan' \
   'Potential static private key block found in codebase.' \
-  -e '-----BEGIN ([A-Za-z0-9_-]+ )*PRIVATE KEY-----'
+  -e '-----BEGIN ([A-Za-z0-9_-]+ )*PRIVATE KEY( BLOCK)?-----'
 
 if [[ "${failed}" -ne 0 ]]; then
   exit 1

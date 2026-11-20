@@ -483,3 +483,66 @@ func TestAdversarial_RedactSecrets_OpaqueStructuredFields(t *testing.T) {
 		t.Fatalf("query-field redaction consumed unrelated data: %q", redacted)
 	}
 }
+
+func TestAdversarial_RedactSecrets_BypassHardening(t *testing.T) {
+	t.Parallel()
+
+	sampleJWT := strings.Join([]string{
+		"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+		"eyJzdWIiOiIxMjM0NTY3ODkwIiwidGVuYW50X2lkIjoidGVzdCJ9",
+		"signature_value_here",
+	}, ".")
+
+	secrets := []string{
+		"single-quote-tail-val-99",
+		"escaped-quote-tail-val-88",
+		"json-escaped-tail-val-77",
+		"double-esc-tok-val-42",
+		"opaque-trailing-tail-66",
+		"short-tok-val-123",
+		"dXNlcjpwYXNzMTIz",
+		"short-sec-val-123",
+		"YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkw" + "+abc/def==",
+		"url-pass-val-42",
+		"mock-pgp-body-material",
+		"mock-truncated-rsa-material",
+		"partner-tfvar-val-55",
+		"opaque token val 999",
+		"opaque-tenant-tok-11",
+		"opaque-workload-tok-22",
+		"opaque-oidc-tok-33",
+	}
+
+	input := strings.Join([]string{
+		`{"password":"my'` + secrets[0] + `"}`,
+		`{"password":"my\"` + secrets[1] + `"}`,
+		`{\"password\":\"abc\\\"` + secrets[2] + `\"}`,
+		`{\\\"bearer_token\\\":\\\"` + secrets[3] + `\\\"}`,
+		`{"token":"` + sampleJWT + ` ` + secrets[4] + `"}`,
+		`{"authorization":["Bearer ` + secrets[5] + `","Basic ` + secrets[6] + `"]}`,
+		`map[authorization:[Bearer ` + secrets[5] + `]]`,
+		`map[authorization:[Basic ` + secrets[6] + `]]`,
+		`authorization=Bearer ` + secrets[7],
+		`Bearer ` + secrets[8],
+		`https://user:` + secrets[9] + `@global.namespaceapis.com:443`,
+		`https://example.invalid/path?email=user@example.com`,
+		testutil.SynthesizePEMBlock("PGP PRIVATE KEY BLOCK", secrets[10]),
+		testutil.PEMBeginHeader("RSA PRIVATE KEY") + "\n" + secrets[11],
+		`TF_VAR_nsc_partner_token=` + secrets[12],
+		`NSC_TOKEN="` + secrets[13] + `" safe_after=1`,
+		`tenant_token=` + secrets[14] + ` workload_token=` + secrets[15] + ` oidc_token=` + secrets[16],
+	}, "\n")
+
+	redacted := client.RedactSecrets(input)
+	for _, secret := range secrets {
+		if strings.Contains(redacted, secret) {
+			t.Errorf("SECURITY LEAK: secret %q survived RedactSecrets:\n%s", secret, redacted)
+		}
+	}
+	if !strings.Contains(redacted, "https://example.invalid/path?email=user@example.com") {
+		t.Errorf("non-userinfo query email was falsely redacted: %s", redacted)
+	}
+	if !strings.Contains(redacted, "safe_after=1") {
+		t.Errorf("quoted env var redaction consumed trailing text: %s", redacted)
+	}
+}

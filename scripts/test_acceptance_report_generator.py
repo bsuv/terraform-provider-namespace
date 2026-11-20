@@ -707,6 +707,97 @@ class TestAcceptanceReportGeneratorAdversarial(unittest.TestCase):
         self.assertIn("JWT: Bearer [REDACTED_TOKEN]", sanitized_log)
         self.assertIn("client cert:\\n[REDACTED_KEY_OR_CERT]", sanitized_log)
 
+    # 26. Interleaved multiline PEM across parallel JSON events cannot swallow a failing test
+    def test_26_interleaved_multiline_pem_preserves_parallel_test_failure(self):
+        pkg = "github.com/bsuv/terraform-provider-namespace/internal/provider"
+        interleaved = "\n".join([
+            json.dumps({"Action": "run", "Test": "TestAccParallelPEM_A", "Package": pkg}),
+            json.dumps({"Action": "run", "Test": "TestAccParallelFail_B", "Package": pkg}),
+            json.dumps({"Action": "output", "Test": "TestAccParallelPEM_A", "Package": pkg, "Output": "-----BEGIN " + "RSA PRIVATE KEY-----\n"}),
+            json.dumps({"Action": "output", "Test": "TestAccParallelFail_B", "Package": pkg, "Output": "fatal failure in TestB\n"}),
+            json.dumps({"Action": "fail", "Test": "TestAccParallelFail_B", "Package": pkg, "Elapsed": 0.12}),
+            json.dumps({"Action": "output", "Test": "TestAccParallelPEM_A", "Package": pkg, "Output": "MIIEsecretParallelKeyBodyXYZ123\n"}),
+            json.dumps({"Action": "output", "Test": "TestAccParallelPEM_A", "Package": pkg, "Output": "-----END RSA PRIVATE KEY-----\n"}),
+            json.dumps({"Action": "pass", "Test": "TestAccParallelPEM_A", "Package": pkg, "Elapsed": 0.25}),
+        ])
+        proc, report_md, sanitized_log = self.run_generator(f"{build_valid_matrix_log()}\n{interleaved}")
+
+        self.assertEqual(proc.returncode, 1, "Expected Gate 2 failure for interleaved failing test")
+        self.assertIn("Gate 2: 1 test(s) failed", report_md)
+        self.assertIn("TestAccParallelFail_B", report_md)
+        self.assertNotIn("MIIEsecretParallelKeyBodyXYZ123", sanitized_log)
+        self.assertNotIn("MIIEsecretParallelKeyBodyXYZ123", report_md)
+
+    # 27. Word-bounded st_ redaction does not corrupt normal identifiers
+    def test_27_st_prefix_does_not_corrupt_normal_identifiers(self):
+        event = make_json_test_event(
+            "TestAccSecurity_IdentifierIntegrity",
+            "pass",
+            [
+                "manifest_file=ok host_name=example test_token=ok latest_version=1 list_images=2 request_id=abc",
+                "leaked_session=st_real_session_secret_999",
+            ],
+        )
+        proc, report_md, sanitized_log = self.run_generator(f"{build_valid_matrix_log()}\n{event}")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for ident in ("manifest_file", "host_name", "latest_version", "list_images", "request_id"):
+            self.assertIn(ident, sanitized_log)
+        self.assertNotIn("st_real_session_secret_999", sanitized_log)
+        self.assertNotIn("st_real_session_secret_999", report_md)
+
+    # 28. Env vars, escaped/double-escaped quotes, URL userinfo, PGP, JSON arrays, and tenant_token redact cleanly
+    def test_28_env_vars_escaped_quotes_and_url_userinfo_preserve_json_and_redact(self):
+        pgp_block = (
+            "-----BEGIN " + "PGP PRIVATE KEY BLOCK-----\n"
+            "secret-pgp-armor-body-777\n"
+            "-----END PGP PRIVATE KEY BLOCK-----"
+        )
+        secrets = [
+            "partnerSecretEnv44",
+            "EscapedPassTail987",
+            "DoubleEscTok42",
+            "URLPassSecret55",
+            "ShortArrTok123",
+            "BasicArrCred456",
+            "secret-pgp-armor-body-777",
+            "opaqueTenantVal88",
+            "SingleQuotePassTail66",
+        ]
+        lines = [
+            f"TF_VAR_nsc_partner_token={secrets[0]}",
+            f'{{"password":"abc\\"{secrets[1]}"}}',
+            f'{{\\"bearer_token\\":\\"{secrets[2]}\\"}}',
+            f"https://admin:{secrets[3]}@global.namespaceapis.com:443",
+            f'{{"authorization":["Bearer {secrets[4]}","Basic {secrets[5]}"]}}',
+            pgp_block,
+            f"tenant_token={secrets[7]}",
+            f'{{"password":"my\'{secrets[8]}"}}',
+        ]
+        event = make_json_test_event("TestAccSecurity_ExtendedSanitization", "pass", lines)
+        proc, report_md, sanitized_log = self.run_generator(f"{build_valid_matrix_log()}\n{event}")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for secret in secrets:
+            self.assertNotIn(secret, sanitized_log)
+            self.assertNotIn(secret, report_md)
+        # Ensure every emitted JSON line in sanitized_log remains valid JSON
+        for line in sanitized_log.strip().splitlines():
+            json.loads(line)
+
+    # 29. Non-JSON stderr lines captured via 2>&1 alongside JSON events are sanitized cleanly
+    def test_29_stderr_lines_interleaved_in_json_stream_are_sanitized(self):
+        stderr_tok = "nsct_" + "stderr_val_123456"
+        stderr_pass = "stderr-pass-99"
+        stderr_line = f"warning: leaked NSC_TOKEN={stderr_tok} and https://u:{stderr_pass}@host:443"
+        proc, report_md, sanitized_log = self.run_generator(f"{build_valid_matrix_log()}\n{stderr_line}")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn(stderr_tok, sanitized_log)
+        self.assertNotIn(stderr_pass, sanitized_log)
+        self.assertNotIn(stderr_tok, report_md)
+        self.assertIn("NSC_TOKEN=[REDACTED]", sanitized_log)
+
 
 if __name__ == "__main__":
     unittest.main()

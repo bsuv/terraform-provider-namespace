@@ -153,13 +153,13 @@ func (r *sharedImageResource) Create(ctx context.Context, req resource.CreateReq
 	case "PARTNER":
 		visEnum = registryv1beta.Visibility_PARTNER
 	default:
-		resp.Diagnostics.AddError("Invalid Visibility", fmt.Sprintf("Visibility must be 'PUBLIC' or 'PARTNER', got %q", plan.Visibility.ValueString()))
+		tfutil.AddErrorf(&resp.Diagnostics, "Invalid Visibility", "Visibility must be 'PUBLIC' or 'PARTNER', got %q", plan.Visibility.ValueString())
 		return
 	}
 
 	expiresPb, err := tfutil.TFStringToTimestamp(plan.ExpiresAt)
 	if err != nil {
-		resp.Diagnostics.AddError("Invalid Expiration Timestamp", fmt.Sprintf("Failed to parse expires_at: %v", err))
+		tfutil.AddErrorf(&resp.Diagnostics, "Invalid Expiration Timestamp", "Failed to parse expires_at: %v", err)
 		return
 	}
 

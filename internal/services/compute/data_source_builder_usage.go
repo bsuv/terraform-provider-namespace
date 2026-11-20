@@ -204,9 +204,10 @@ func (d *builderUsageDataSource) Read(ctx context.Context, req datasource.ReadRe
 
 	startDate, err := time.Parse(tfutil.ISODateFormat, startStr)
 	if err != nil {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Invalid Period Start Date",
-			fmt.Sprintf("`period_start` %q must be in YYYY-MM-DD format: %s", startStr, err),
+			"`period_start` %q must be in YYYY-MM-DD format: %s", startStr, err,
 		)
 		return
 	}
@@ -223,16 +224,18 @@ func (d *builderUsageDataSource) Read(ctx context.Context, req datasource.ReadRe
 	if endStr != "" {
 		endDate, err := time.Parse(tfutil.ISODateFormat, endStr)
 		if err != nil {
-			resp.Diagnostics.AddError(
+			tfutil.AddErrorf(
+				&resp.Diagnostics,
 				"Invalid Period End Date",
-				fmt.Sprintf("`period_end` %q must be in YYYY-MM-DD format: %s", endStr, err),
+				"`period_end` %q must be in YYYY-MM-DD format: %s", endStr, err,
 			)
 			return
 		}
 		if endDate.Before(startDate) {
-			resp.Diagnostics.AddError(
+			tfutil.AddErrorf(
+				&resp.Diagnostics,
 				"Invalid Period Range",
-				fmt.Sprintf("period_end %q must be greater than or equal to period_start %q", endStr, startStr),
+				"period_end %q must be greater than or equal to period_start %q", endStr, startStr,
 			)
 			return
 		}

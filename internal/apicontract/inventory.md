@@ -5,7 +5,7 @@
 - **gRPC Stubs Package Base:** `buf.build/gen/go/namespace/cloud/grpc/go@v1.6.2-20260820164744-a1973bcf4d87.1`
 - **Integrations SDK:** `namespacelabs.dev/integrations@v0.0.10`
 - **Terraform Plugin Framework:** `v1.19.0`
-- **Go Baseline:** `1.26.7`
+- **Go Baseline:** `1.26.11`
 
 ---
 

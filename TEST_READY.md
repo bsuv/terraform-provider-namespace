@@ -4,7 +4,7 @@ This file is a runbook, not an evergreen “ready” attestation. A release cand
 
 ## Offline gates
 
-- Go 1.26.7: `go test -count=1 ./...` and `go test -count=1 -race ./...`.
+- Go 1.26.11: `go test -count=1 ./...` and `go test -count=1 -race ./...`.
 - Static analysis: `go vet ./...`, `golangci-lint run ./...`, `gofmt -l .`, `go mod tidy -diff` / `go mod verify`, and fail-closed secret scanning over every GitHub-visible ref.
 - Terraform: `terraform fmt -check -recursive .` plus clean-install/example validation on Terraform 1.11 and the current supported latest release.
 - Documentation: deterministic `tfplugindocs generate --provider-name namespace --rendered-provider-name "Namespace Cloud"`, no generated diff, and `tfplugindocs validate --provider-name namespace`.
@@ -17,6 +17,6 @@ This file is a runbook, not an evergreen “ready” attestation. A release cand
 - The report generator accepts all required RPC, endpoint, status, scope, assertion, package-result, and immutable-provenance contracts.
 - Singleton registry reset behavior passes in the serialized acceptance stage.
 - The tag resolves to the exact tested commit.
-- GoReleaser 2.17.1 produces the configured archives, manifest, checksums, and a Registry-compatible RSA/DSA signature; CI smoke-tests the exact unsigned snapshot assets, and the release workflow verifies the signed staged distribution before draft promotion.
+- GoReleaser 2.20.2 produces the configured archives, manifest, checksums, and a Registry-compatible RSA/DSA signature; CI smoke-tests the exact unsigned snapshot assets, and the release workflow verifies the signed staged distribution before draft promotion.
 
 The authoritative evidence locations and retention rules are defined in `internal/apicontract/live_report.md` and `docs/release_checklist.md`. Fixed test counts are intentionally omitted because they become stale and do not prove coverage or release readiness.

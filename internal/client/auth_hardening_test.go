@@ -180,3 +180,44 @@ func TestCheckTokenFilePermissions_AndClientTokenFilePath(t *testing.T) {
 		t.Errorf("expected TokenFilePath %q, got %q", strictPath, got)
 	}
 }
+
+func TestResolveTenantFromToken_SessionTokenPrecedenceAndConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	testTenantJWT := createTestJWT(map[string]interface{}{"tenant_id": "safe-test-tenant"})
+	prodTenantJWT := createTestJWT(map[string]interface{}{"tenant_id": "unauthorized-prod-tenant"})
+
+	// 1. Conflicting tenants (safe bearer_token + prod session_token) MUST fail closed.
+	conflictPath := filepath.Join(tmpDir, "conflict.json")
+	conflictPayload := fmt.Sprintf(`{"bearer_token": %q, "session_token": "st_%s"}`, testTenantJWT, prodTenantJWT)
+	if err := os.WriteFile(conflictPath, []byte(conflictPayload), 0600); err != nil {
+		t.Fatalf("failed to write conflict token file: %v", err)
+	}
+	if _, err := client.ResolveTenantFromToken(conflictPath); err == nil || !strings.Contains(err.Error(), "conflicting tenants") {
+		t.Fatalf("expected conflicting tenants error for mismatched bearer_token/session_token, got: %v", err)
+	}
+	if err := client.VerifyTenantTokenMatch(conflictPath, "safe-test-tenant"); err == nil {
+		t.Fatal("expected VerifyTenantTokenMatch to reject dual-field file with prod session_token")
+	}
+
+	// 2. Opaque session_token paired with valid test-tenant bearer_token MUST fail closed (never fall back to bearer_token).
+	opaqueSessionPath := filepath.Join(tmpDir, "opaque_session.json")
+	opaqueSessionPayload := fmt.Sprintf(`{"bearer_token": %q, "session_token": "st_opaque_prod_session"}`, testTenantJWT)
+	if err := os.WriteFile(opaqueSessionPath, []byte(opaqueSessionPayload), 0600); err != nil {
+		t.Fatalf("failed to write opaque session token file: %v", err)
+	}
+	if _, err := client.ResolveTenantFromToken(opaqueSessionPath); err == nil || !strings.Contains(err.Error(), "unsupported or opaque token format") {
+		t.Fatalf("expected fail-closed opaque error when session_token is opaque, got: %v", err)
+	}
+
+	// 3. Matching tenants across both fields succeed.
+	matchingPath := filepath.Join(tmpDir, "matching.json")
+	matchingPayload := fmt.Sprintf(`{"bearer_token": %q, "session_token": "st_%s"}`, testTenantJWT, testTenantJWT)
+	if err := os.WriteFile(matchingPath, []byte(matchingPayload), 0600); err != nil {
+		t.Fatalf("failed to write matching token file: %v", err)
+	}
+	resolved, err := client.ResolveTenantFromToken(matchingPath)
+	if err != nil || resolved != "safe-test-tenant" {
+		t.Fatalf("expected matching dual-field file to resolve to safe-test-tenant, got %q (err=%v)", resolved, err)
+	}
+}

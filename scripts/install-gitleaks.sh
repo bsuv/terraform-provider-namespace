@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-GITLEAKS_VERSION="8.30.0"
-GITLEAKS_LINUX_X64_SHA256="79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"
+GITLEAKS_VERSION="8.30.1"
+GITLEAKS_LINUX_X64_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
 
 if [[ $# -gt 1 ]]; then
   echo "Usage: $0 [install-directory]" >&2

@@ -57,11 +57,14 @@ While ephemeral resources prevent credentials from entering state, managed resou
 ### Metadata SSRF & Malformed Endpoint Protections
 - Endpoint validation enforces `https://` (or bare `host[:port]` dialed over TLS) and rejects `http://` or non-HTTPS schemes, userinfo/credentials (`user:pass@`), URL paths, query strings, and fragments.
 - Raw endpoint strings containing ASCII control characters (`< 0x20`, `0x7f`) or embedded whitespace are rejected.
-- To mitigate Server-Side Request Forgery (SSRF) against cloud instance metadata services and ambiguous bind targets, endpoint validation rejects:
-  - Unspecified IP addresses (`0.0.0.0`, `::`, and IPv4-mapped `::ffff:0.0.0.0`)
-  - IPv4 link-local and cloud metadata addresses (`169.254.0.0/16`, including `169.254.169.254` and IPv4-mapped forms)
+- To mitigate Server-Side Request Forgery (SSRF) against cloud instance metadata services, resolver scheme confusion, and ambiguous bind targets, endpoint validation and dial-time IP/proxy controls reject:
+  - Reserved gRPC resolver scheme names (`unix`, `unix-abstract`, `passthrough`, `dns`, `xds`, `google-c2p`) and enforce explicit `dns:///` target URIs for direct gRPC connections
+  - Cloud metadata hostnames (`metadata`, `metadata.google.internal`, `metadata.goog`, `instance-data`, `instance-data.ec2.internal`, `metadata.azure.internal`, `metadata.nic.internal`) and non-canonical numeric IPv4 literals
+  - Unspecified IP addresses (`0.0.0.0`, `::`, and IPv4-mapped/compatible/NAT64 forms)
+  - IPv4 link-local and cloud metadata addresses (`169.254.0.0/16`, including `169.254.169.254`, `100.100.100.200`, and IPv4-mapped/compatible/NAT64 forms)
   - IPv6 link-local addresses (`fe80::/10`, including zoned addresses)
   - AWS IPv6 EC2 instance metadata (`fd00:ec2::254`)
+  - Resolved metadata/link-local/unspecified IPs at TCP dial time (`net.Dialer.Control`) for both direct connections and `HTTPS_PROXY`/`HTTP_PROXY` tunnels
 - Loopback hosts (`localhost`, `127.0.0.1`, `::1`), private test/enterprise proxy hosts, and valid custom domain hostnames remain allowed.
 
 ### TLS 1.2+ Floor & Per-Connection Transport Security

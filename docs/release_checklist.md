@@ -28,9 +28,9 @@ The Namespace Terraform Provider conforms to the **Terraform Registry Provider P
 
 ### 2.2. Pinned Release Toolchain
 
-- Use Go 1.26.7 for all mandatory build, test, and release gates. The scheduled current-dependencies lane separately exercises Go 1.27.x.
-- Use GoReleaser 2.17.1 for configuration checks, snapshots, and releases.
-- Use Gitleaks 8.30.0 for secret scanning. Linux x86_64 CI installs the checksum-pinned binary with `scripts/install-gitleaks.sh`; other platforms must install the same version directly. The scan intentionally rejects missing or different versions.
+- Use Go 1.26.11 for all mandatory build, test, and release gates. The scheduled current-dependencies lane separately exercises Go 1.27.x.
+- Use GoReleaser 2.20.2 for configuration checks, snapshots, and releases.
+- Use Gitleaks 8.30.1 for secret scanning. Linux x86_64 CI installs the checksum-pinned binary with `scripts/install-gitleaks.sh`; other platforms must install the same version directly. The scan intentionally rejects missing or different versions.
 
 ### 2.3. GPG Key Generation & Export
 1. Generate a dedicated 4096-bit RSA GPG key (**Note**: The Terraform Registry signing ingestion service strictly requires **RSA** (>= 2048-bit, 4096-bit recommended) or DSA keys. Elliptic Curve keys—including **ECC, Ed25519, and ECDSA—are unsupported** by the Terraform Registry and will cause registry ingestion/verification failure). Use the interactive flow and protect the key with a unique, strong passphrase; never generate an unprotected release key:
@@ -100,12 +100,12 @@ Execute the full suite of local quality gates before tagging a release:
   python3 -m unittest -v scripts/test_acceptance_report_generator.py
   ```
 
-- [ ] **5. Dependency, Vulnerability, and Secret Gates** (with Go 1.26.7):
+- [ ] **5. Dependency, Vulnerability, and Secret Gates** (with Go 1.26.11):
   ```bash
   go mod tidy
   git diff --exit-code go.mod go.sum
   go mod verify
-  go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+  go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
   git fetch --force origin \
     '+refs/heads/*:refs/remotes/origin/*' \
     '+refs/tags/*:refs/tags/*' \
@@ -122,7 +122,7 @@ Execute the full suite of local quality gates before tagging a release:
 
 - [ ] **7. GoReleaser Configuration Check**:
   ```bash
-  # Use exactly GoReleaser 2.17.1.
+  # Use exactly GoReleaser 2.20.2.
   goreleaser check
   # Must pass with 1 configuration file(s) validated
   ```

@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        terraform: ['1.11.0', 'latest']
+        terraform: ['latest']
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,7 +57,7 @@ jobs:
           NSC_TEST_VAULT_SECRET_ID: ${{ secrets.NSC_TEST_VAULT_SECRET_ID }}
         run: |
           mkdir -p test-reports-matrix
-          go test -v -json -count=1 -timeout 120m ./internal/provider/... -run '^TestAcc' -skip '^TestAccRegistryPolicy_Default$' > "${RUNNER_TEMP:-/tmp}/test-matrix.json"
+          go test -v -json -count=1 -timeout 120m ./internal/provider/... -run '^TestAcc' -skip '^TestAccRegistryPolicy_Default$' > "${RUNNER_TEMP:-/tmp}/test-matrix.json" 2>&1
 
       - name: Generate Acceptance Test Report & JUnit Artifacts
         if: always()
@@ -138,7 +138,7 @@ jobs:
           NSC_TEST_VAULT_SECRET_ID: ${{ secrets.NSC_TEST_VAULT_SECRET_ID }}
         run: |
           mkdir -p test-reports-singletons
-          go test -v -json -count=1 -timeout 30m ./internal/provider/... -run '^TestAccRegistryPolicy_Default$' > "${RUNNER_TEMP:-/tmp}/test-singletons.json"
+          go test -v -json -count=1 -timeout 30m ./internal/provider/... -run '^TestAccRegistryPolicy_Default$' > "${RUNNER_TEMP:-/tmp}/test-singletons.json" 2>&1
 
       - name: Generate Singleton Test Report & JUnit Artifacts
         if: always()

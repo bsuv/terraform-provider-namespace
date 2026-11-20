@@ -131,16 +131,18 @@ func (d *secretMetadataDataSource) Read(ctx context.Context, req datasource.Read
 	}
 
 	if len(matches) == 0 {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Vault Secret Metadata Not Found",
-			fmt.Sprintf("No secret metadata found with object_id %q", objectID),
+			"No secret metadata found with object_id %q", objectID,
 		)
 		return
 	}
 	if len(matches) > 1 {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Multiple Vault Secret Objects Found",
-			fmt.Sprintf("Multiple secret objects found with object_id %q", objectID),
+			"Multiple secret objects found with object_id %q", objectID,
 		)
 		return
 	}

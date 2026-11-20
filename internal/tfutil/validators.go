@@ -38,19 +38,21 @@ func (v *durationAtLeastValidator) ValidateString(_ context.Context, req validat
 	val := req.ConfigValue.ValueString()
 	dur, err := time.ParseDuration(val)
 	if err != nil {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Invalid Duration Format",
-			fmt.Sprintf("Attribute %s must be a valid Go duration string (e.g., '4h', '30m'): %s", req.Path, err),
+			"Attribute %s must be a valid Go duration string (e.g., '4h', '30m'): %s", req.Path, err,
 		)
 		return
 	}
 
 	if dur < v.min {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Duration Below Minimum",
-			fmt.Sprintf("Attribute %s duration (%s) must be at least %s", req.Path, val, v.min),
+			"Attribute %s duration (%s) must be at least %s", req.Path, val, v.min,
 		)
 	}
 }
@@ -79,19 +81,21 @@ func (v *durationPositiveValidator) ValidateString(_ context.Context, req valida
 	val := req.ConfigValue.ValueString()
 	dur, err := time.ParseDuration(val)
 	if err != nil {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Invalid Duration Format",
-			fmt.Sprintf("Attribute %s must be a valid Go duration string (e.g., '4h', '30m'): %s", req.Path, err),
+			"Attribute %s must be a valid Go duration string (e.g., '4h', '30m'): %s", req.Path, err,
 		)
 		return
 	}
 
 	if dur <= 0 {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Duration Must Be Positive",
-			fmt.Sprintf("Attribute %s duration (%s) must be greater than zero", req.Path, val),
+			"Attribute %s duration (%s) must be greater than zero", req.Path, val,
 		)
 	}
 }
@@ -123,19 +127,21 @@ func (v *durationBetweenValidator) ValidateString(_ context.Context, req validat
 	val := req.ConfigValue.ValueString()
 	dur, err := time.ParseDuration(val)
 	if err != nil {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Invalid Duration Format",
-			fmt.Sprintf("Attribute %s must be a valid Go duration string: %s", req.Path, err),
+			"Attribute %s must be a valid Go duration string: %s", req.Path, err,
 		)
 		return
 	}
 
 	if dur < v.min || dur > v.max {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Duration Out of Range",
-			fmt.Sprintf("Attribute %s duration (%s) must be between %s and %s", req.Path, val, v.min, v.max),
+			"Attribute %s duration (%s) must be between %s and %s", req.Path, val, v.min, v.max,
 		)
 	}
 }
@@ -164,10 +170,11 @@ func (v *nonEmptyStringValidator) ValidateString(_ context.Context, req validato
 
 	val := req.ConfigValue.ValueString()
 	if strings.TrimSpace(val) == "" {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Invalid String Value",
-			fmt.Sprintf("Attribute %s must not be empty or whitespace-only", req.Path),
+			"Attribute %s must not be empty or whitespace-only", req.Path,
 		)
 	}
 }
@@ -201,10 +208,11 @@ func (v *validEnumValidator) ValidateString(_ context.Context, req validator.Str
 		}
 	}
 
-	resp.Diagnostics.AddAttributeError(
+	AddAttributeErrorf(
+		&resp.Diagnostics,
 		req.Path,
 		"Invalid Attribute Value",
-		fmt.Sprintf("Attribute %s value %q is invalid. Must be one of [%s]", req.Path, val, strings.Join(v.allowed, ", ")),
+		"Attribute %s value %q is invalid. Must be one of [%s]", req.Path, val, strings.Join(v.allowed, ", "),
 	)
 }
 
@@ -230,10 +238,11 @@ func (v *validEndpointValidator) ValidateString(_ context.Context, req validator
 
 	val := req.ConfigValue.ValueString()
 	if err := endpointutil.Validate(val); err != nil {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Invalid Endpoint",
-			fmt.Sprintf("Attribute %s %s", req.Path, err),
+			"Attribute %s %s", req.Path, err,
 		)
 	}
 }
@@ -261,10 +270,11 @@ func (v *validRFC3339Validator) ValidateString(_ context.Context, req validator.
 	val := req.ConfigValue.ValueString()
 	_, err := time.Parse(time.RFC3339Nano, val)
 	if err != nil {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Invalid RFC3339 Timestamp",
-			fmt.Sprintf("Attribute %s must be a valid RFC3339 timestamp (e.g. '2026-08-21T20:30:00Z'): %s", req.Path, err),
+			"Attribute %s must be a valid RFC3339 timestamp (e.g. '2026-08-21T20:30:00Z'): %s", req.Path, err,
 		)
 	}
 }
@@ -292,10 +302,11 @@ func (v *validISODateValidator) ValidateString(_ context.Context, req validator.
 	val := req.ConfigValue.ValueString()
 	_, err := time.Parse(ISODateFormat, val)
 	if err != nil {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Invalid Date Format",
-			fmt.Sprintf("Attribute %s must be formatted as YYYY-MM-DD (e.g. '2026-08-21'): %s", req.Path, err),
+			"Attribute %s must be formatted as YYYY-MM-DD (e.g. '2026-08-21'): %s", req.Path, err,
 		)
 	}
 }
@@ -326,10 +337,11 @@ func (v *int64AtLeastValidator) ValidateInt64(_ context.Context, req validator.I
 
 	val := req.ConfigValue.ValueInt64()
 	if val < v.min {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Value Below Minimum",
-			fmt.Sprintf("Attribute %s value (%d) must be at least %d", req.Path, val, v.min),
+			"Attribute %s value (%d) must be at least %d", req.Path, val, v.min,
 		)
 	}
 }
@@ -356,10 +368,11 @@ func (v *int64PositiveValidator) ValidateInt64(_ context.Context, req validator.
 
 	val := req.ConfigValue.ValueInt64()
 	if val <= 0 {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Value Must Be Positive",
-			fmt.Sprintf("Attribute %s value (%d) must be greater than zero", req.Path, val),
+			"Attribute %s value (%d) must be greater than zero", req.Path, val,
 		)
 	}
 }
@@ -389,10 +402,11 @@ func (v *int64BetweenValidator) ValidateInt64(_ context.Context, req validator.I
 
 	val := req.ConfigValue.ValueInt64()
 	if val < v.min || val > v.max {
-		resp.Diagnostics.AddAttributeError(
+		AddAttributeErrorf(
+			&resp.Diagnostics,
 			req.Path,
 			"Value Out of Range",
-			fmt.Sprintf("Attribute %s value (%d) must be between %d and %d", req.Path, val, v.min, v.max),
+			"Attribute %s value (%d) must be between %d and %d", req.Path, val, v.min, v.max,
 		)
 	}
 }

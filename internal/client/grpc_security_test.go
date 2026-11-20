@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,14 +10,19 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/cloud/iam/v1beta/iamv1betagrpc"
+	"buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/private/sessions/sessionsv1betagrpc"
 	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
+	sessions "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/private/sessions"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -271,5 +277,263 @@ func TestTokenCredWrapper_TLSAlwaysRequiresTransportSecurity(t *testing.T) {
 	}
 	if echoSrv.gotAuth != "Bearer nsct_tls_e2e_token" {
 		t.Fatalf("expected server to receive Bearer token over TLS, got %q", echoSrv.gotAuth)
+	}
+}
+
+type testEchoSessionServer struct {
+	sessionsv1betagrpc.UnimplementedUserSessionsServiceServer
+	gotAuth     string
+	returnEmpty bool
+}
+
+func (s *testEchoSessionServer) IssueTenantTokenFromSession(ctx context.Context, _ *sessions.IssueTenantTokenFromSessionRequest) (*sessions.IssueTenantTokenFromSessionResponse, error) {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get("authorization"); len(vals) > 0 {
+			s.gotAuth = vals[0]
+		}
+	}
+	if s.returnEmpty {
+		return &sessions.IssueTenantTokenFromSessionResponse{TenantToken: "   "}, nil
+	}
+	return &sessions.IssueTenantTokenFromSessionResponse{TenantToken: "nsct_exchanged_tls_token"}, nil
+}
+
+func TestSessionTokenSource_EnforcesTransportSecurityAndRejectsEmptyToken(t *testing.T) {
+	orig := grpcapi.RequireTransportSecurity
+	t.Cleanup(func() {
+		grpcapi.RequireTransportSecurity = orig
+	})
+
+	// 1. With RequireTransportSecurity=true and insecure creds, SessionTokenSource MUST refuse to send session tokens in cleartext.
+	grpcapi.RequireTransportSecurity = true
+	insecSTS := NewSessionTokenSource("st_cleartext_must_not_send", "https://127.0.0.1:443", insecure.NewCredentials())
+	defer func() { _ = insecSTS.Close() }()
+
+	_, err := insecSTS.IssueToken(context.Background(), time.Minute, false)
+	if err == nil || !strings.Contains(err.Error(), "transport level security") {
+		t.Fatalf("expected transport level security error for insecure SessionTokenSource with RequireTransportSecurity=true, got: %v", err)
+	}
+
+	// 2. Over TLS 1.2+, SessionTokenSource delivers session token via per-RPC credentials and rejects empty responses.
+	tlsCert, rootPool := generateLoopbackTestCert(t)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer func() { _ = lis.Close() }()
+
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{tlsCert},
+	})))
+	sessSrv := &testEchoSessionServer{}
+	sessionsv1betagrpc.RegisterUserSessionsServiceServer(srv, sessSrv)
+	go func() {
+		_ = srv.Serve(lis)
+	}()
+	t.Cleanup(srv.Stop)
+
+	clientTLS := newDefaultTLSConfig()
+	clientTLS.RootCAs = rootPool
+
+	tlsSTS := NewSessionTokenSource("st_tls_session_secret", "https://"+lis.Addr().String(), credentials.NewTLS(clientTLS))
+	defer func() { _ = tlsSTS.Close() }()
+
+	tok, err := tlsSTS.IssueToken(context.Background(), time.Minute, false)
+	if err != nil {
+		t.Fatalf("expected TLS SessionTokenSource.IssueToken to succeed, got: %v", err)
+	}
+	if tok != "nsct_exchanged_tls_token" {
+		t.Fatalf("expected exchanged token, got %q", tok)
+	}
+	if sessSrv.gotAuth != "Bearer st_tls_session_secret" {
+		t.Fatalf("expected server to receive per-RPC Bearer session token, got %q", sessSrv.gotAuth)
+	}
+
+	// Empty token response must fail closed instead of caching empty token.
+	sessSrv.returnEmpty = true
+	if _, err := tlsSTS.IssueToken(context.Background(), time.Minute, true); err == nil || !strings.Contains(err.Error(), "empty tenant token") {
+		t.Fatalf("expected empty tenant token error, got: %v", err)
+	}
+}
+
+func TestSSRFSafeDialer_BlocksMetadataIPsAndPreservesValidatedHTTPSProxy(t *testing.T) {
+	// 1. Direct dial-time Control rejects blocked metadata/link-local/unspecified/NAT64 IPs.
+	blockedAddrs := []string{
+		"169.254.169.254:443",
+		"169.254.0.1:443",
+		"[fe80::1]:443",
+		"[fd00:ec2::254]:443",
+		"100.100.100.200:443",
+		"[::169.254.169.254]:443",
+		"[64:ff9b::169.254.169.254]:443",
+		"0.0.0.0:443",
+		"[::]:443",
+	}
+	for _, addr := range blockedAddrs {
+		if err := ssrfDialControl("tcp", addr, nil); err == nil {
+			t.Errorf("expected ssrfDialControl to reject %q, got nil", addr)
+		}
+	}
+
+	allowedAddrs := []string{
+		"127.0.0.1:443",
+		"[::1]:443",
+		"10.0.0.1:443",
+		"203.0.113.10:443",
+	}
+	for _, addr := range allowedAddrs {
+		if err := ssrfDialControl("tcp", addr, nil); err != nil {
+			t.Errorf("expected ssrfDialControl to allow %q, got: %v", addr, err)
+		}
+	}
+
+	// 2. HTTPS_PROXY targeting IMDS IP or cloud metadata hostname is rejected immediately.
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	for _, badProxy := range []string{
+		"http://169.254.169.254:80",
+		"http://metadata.google.internal:80",
+		"http://100.100.100.200:80",
+		"socks5://127.0.0.1:1080",
+	} {
+		t.Setenv("HTTPS_PROXY", badProxy)
+		t.Setenv("https_proxy", badProxy)
+		if _, err := NewConnectionWithEndpointWithTransportCredentials(
+			context.Background(),
+			"https://global.namespaceapis.com:443",
+			StaticTokenSource{Token: "nsct_test"},
+			nil,
+		); err == nil {
+			t.Fatalf("expected bad HTTPS_PROXY %q to be rejected, got nil", badProxy)
+		}
+	}
+
+	// 3. Valid corporate HTTP CONNECT proxy on loopback tunnels TLS gRPC end-to-end
+	// for a non-loopback hostname (httpproxy bypasses proxies for loopback targets).
+	const proxyTargetHost = "proxy-target.example.test"
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate proxy target key: %v", err)
+	}
+	targetTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: proxyTargetHost},
+		DNSNames:     []string{proxyTargetHost},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	targetCertDER, err := x509.CreateCertificate(rand.Reader, targetTemplate, targetTemplate, &privKey.PublicKey, privKey)
+	if err != nil {
+		t.Fatalf("failed to create proxy target cert: %v", err)
+	}
+	targetKeyDER, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		t.Fatalf("failed to marshal proxy target key: %v", err)
+	}
+	targetCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: targetCertDER})
+	targetKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: targetKeyDER})
+	tlsCert, err := tls.X509KeyPair(targetCertPEM, targetKeyPEM)
+	if err != nil {
+		t.Fatalf("failed to load proxy target X509KeyPair: %v", err)
+	}
+	rootPool := x509.NewCertPool()
+	if !rootPool.AppendCertsFromPEM(targetCertPEM) {
+		t.Fatal("failed to append proxy target certificate to root pool")
+	}
+
+	targetLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen for target gRPC server: %v", err)
+	}
+	defer func() { _ = targetLis.Close() }()
+
+	grpcSrv := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{tlsCert},
+	})))
+	echoSrv := &testEchoTokenServer{}
+	iamv1betagrpc.RegisterTokenServiceServer(grpcSrv, echoSrv)
+	go func() {
+		_ = grpcSrv.Serve(targetLis)
+	}()
+	t.Cleanup(grpcSrv.Stop)
+
+	proxyLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen for test CONNECT proxy: %v", err)
+	}
+	defer func() { _ = proxyLis.Close() }()
+
+	var connectCount atomic.Int32
+	go func() {
+		for {
+			clientConn, acceptErr := proxyLis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				br := bufio.NewReader(c)
+				req, reqErr := http.ReadRequest(br)
+				if reqErr != nil || req.Method != http.MethodConnect {
+					return
+				}
+				if req.Host != proxyTargetHost+":443" {
+					_, _ = io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n\r\n")
+					return
+				}
+				connectCount.Add(1)
+				upstream, dialErr := net.DialTimeout("tcp", targetLis.Addr().String(), 2*time.Second)
+				if dialErr != nil {
+					_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+					return
+				}
+				defer func() { _ = upstream.Close() }()
+				_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
+				done := make(chan struct{}, 2)
+				go func() {
+					_, _ = io.Copy(upstream, br)
+					done <- struct{}{}
+				}()
+				go func() {
+					_, _ = io.Copy(c, upstream)
+					done <- struct{}{}
+				}()
+				<-done
+			}(clientConn)
+		}
+	}()
+
+	proxyAddr := "http://" + proxyLis.Addr().String()
+	t.Setenv("HTTPS_PROXY", proxyAddr)
+	t.Setenv("https_proxy", proxyAddr)
+
+	clientTLS := newDefaultTLSConfig()
+	clientTLS.RootCAs = rootPool
+	conn, err := NewConnectionWithEndpointWithTransportCredentials(
+		context.Background(),
+		"https://"+proxyTargetHost+":443",
+		StaticTokenSource{Token: "nsct_proxied_tls_token"},
+		credentials.NewTLS(clientTLS),
+	)
+	if err != nil {
+		t.Fatalf("failed to create proxied TLS gRPC client: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tokCli := iamv1betagrpc.NewTokenServiceClient(conn)
+	if _, err := tokCli.IssueTenantToken(ctx, &iamv1beta.IssueTenantTokenRequest{}); err != nil {
+		t.Fatalf("proxied TLS gRPC call failed: %v", err)
+	}
+	if connectCount.Load() == 0 {
+		t.Fatal("expected gRPC connection to traverse the configured HTTP CONNECT proxy")
+	}
+	if echoSrv.gotAuth != "Bearer nsct_proxied_tls_token" {
+		t.Fatalf("expected server to receive Bearer token via proxy tunnel, got %q", echoSrv.gotAuth)
 	}
 }

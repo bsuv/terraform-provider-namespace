@@ -169,9 +169,10 @@ func (d *persistentVolumeDataSource) Read(ctx context.Context, req datasource.Re
 			if tag != "" {
 				filterDesc = fmt.Sprintf("tag=%q", tag)
 			}
-			resp.Diagnostics.AddError(
+			tfutil.AddErrorf(
+				&resp.Diagnostics,
 				"Persistent Volume Not Found",
-				fmt.Sprintf("No persistent volume found matching %s: %s", filterDesc, client.RedactSecrets(st.Message())),
+				"No persistent volume found matching %s: %s", filterDesc, st.Message(),
 			)
 			return
 		}
@@ -185,9 +186,10 @@ func (d *persistentVolumeDataSource) Read(ctx context.Context, req datasource.Re
 		if tag != "" {
 			filterDesc = fmt.Sprintf("tag=%q", tag)
 		}
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Persistent Volume Not Found",
-			fmt.Sprintf("No persistent volume returned matching %s", filterDesc),
+			"No persistent volume returned matching %s", filterDesc,
 		)
 		return
 	}

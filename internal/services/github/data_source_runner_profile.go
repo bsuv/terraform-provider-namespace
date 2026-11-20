@@ -338,11 +338,11 @@ func (d *runnerProfileDataSource) Read(ctx context.Context, req datasource.ReadR
 	}
 
 	if len(matches) == 0 {
-		resp.Diagnostics.AddError("Runner Profile Not Found", fmt.Sprintf("No runner profile found matching %s", filterDesc))
+		tfutil.AddErrorf(&resp.Diagnostics, "Runner Profile Not Found", "No runner profile found matching %s", filterDesc)
 		return
 	}
 	if len(matches) > 1 {
-		resp.Diagnostics.AddError("Multiple Runner Profiles Found", fmt.Sprintf("Multiple runner profiles matched %s. Refine your query or use `profile_id`.", filterDesc))
+		tfutil.AddErrorf(&resp.Diagnostics, "Multiple Runner Profiles Found", "Multiple runner profiles matched %s. Refine your query or use `profile_id`.", filterDesc)
 		return
 	}
 

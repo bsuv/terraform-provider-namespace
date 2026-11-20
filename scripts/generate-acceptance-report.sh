@@ -115,27 +115,141 @@ with open(input_path, 'r', encoding='utf-8', errors='replace') as f:
     raw_content = f.read()
 
 # 2. Secret Redaction / Sanitization
+PEM_COMPLETE_RE = re.compile(
+    r'-----BEGIN (?:[A-Z0-9_-]+ )*(?:PRIVATE KEY(?: BLOCK)?|CERTIFICATE)-----[\s\S]*?'
+    r'-----END (?:[A-Z0-9_-]+ )*(?:PRIVATE KEY(?: BLOCK)?|CERTIFICATE)-----'
+)
+PEM_BEGIN_RE = re.compile(
+    r'-----BEGIN (?:[A-Z0-9_-]+ )*(?:PRIVATE KEY(?: BLOCK)?|CERTIFICATE)-----'
+)
+PEM_END_RE = re.compile(
+    r'-----END (?:[A-Z0-9_-]+ )*(?:PRIVATE KEY(?: BLOCK)?|CERTIFICATE)-----'
+)
+PEM_TRUNCATED_RE = re.compile(
+    r'-----BEGIN (?:[A-Z0-9_-]+ )*(?:PRIVATE KEY(?: BLOCK)?|CERTIFICATE)-----[^\r\n"\']*'
+    r'(?:(?:\r?\n|\\r?\\n)[ \t]*(?:[A-Za-z0-9+/_\-]+={0,2}|(?:Version|Comment|Proc-Type|DEK-Info):[^\r\n"\']*)(?=\r?\n|\\r?\\n|["\']|$))*'
+)
+
+
+def _scan_quoted_value_end(text, start, bs_len, quote):
+    step = 2 * (bs_len + 1)
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ('\r', '\n'):
+            return None
+        if ch == '\\':
+            b_start = i
+            while i < n and text[i] == '\\':
+                i += 1
+            b_count = i - b_start
+            if i < n and text[i] == quote:
+                if b_count < bs_len:
+                    return (b_start, b_start)
+                if (b_count - bs_len) % step == 0:
+                    return (i - bs_len, i + 1)
+                i += 1
+            continue
+        if ch == quote:
+            if bs_len == 0:
+                return (i, i + 1)
+            return (i, i)
+        i += 1
+    return None
+
+
 def sanitize(text):
-    def redact_quoted_field(value, key_pattern, marker, value_transform=None):
-        # Match ordinary and JSON-escaped quoted keys/values. Sanitization runs
-        # before go test -json is parsed, so escaped quotes are expected here.
-        pattern = re.compile(
-            rf'(?i)(?P<prefix>(?:\\?["\'])?(?:{key_pattern})(?:\\?["\'])?[ \t]*[:=][ \t]*'
-            rf'(?P<quote>\\?["\']))(?P<value>.*?)(?P=quote)'
-        )
+    def authorization_marker(value):
+        stripped = value.lstrip()
+        if re.match(r'(?i)bearer\b', stripped):
+            return 'Bearer [REDACTED_TOKEN]'
+        if re.match(r'(?i)basic\b', stripped):
+            return 'Basic [REDACTED_SECRET]'
+        return '[REDACTED_TOKEN]'
 
-        def replace(match):
-            replacement = marker
-            if value_transform is not None:
-                replacement = value_transform(match.group('value'))
-            return f"{match.group('prefix')}{replacement}{match.group('quote')}"
+    def redact_quoted_field(value, key_pattern, marker, value_transform=None, require_quoted_key=False):
+        if require_quoted_key:
+            prefix_re = re.compile(
+                rf'(?i)((?:\\*["\'])(?:{key_pattern})(?:\\*["\'])[ \t]*[:=][ \t]*)(\\*)(["\'])'
+            )
+        else:
+            prefix_re = re.compile(
+                rf'(?i)((?:\\*["\'])?(?:{key_pattern})(?:\\*["\'])?[ \t]*[:=][ \t]*)(\\*)(["\'])'
+            )
+        out = []
+        pos = 0
+        n = len(value)
+        while pos < n:
+            m = prefix_re.search(value, pos)
+            if not m:
+                out.append(value[pos:])
+                break
+            val_start = m.end()
+            bs_len = len(m.group(2))
+            quote = m.group(3)
+            bounds = _scan_quoted_value_end(value, val_start, bs_len, quote)
+            if bounds is None:
+                out.append(value[pos:val_start])
+                pos = val_start
+                continue
+            val_end, close_end = bounds
+            raw_val = value[val_start:val_end]
+            replacement = value_transform(raw_val) if value_transform is not None else marker
+            out.append(value[pos:val_start])
+            out.append(replacement)
+            out.append(value[val_end:close_end])
+            pos = close_end
+        return ''.join(out)
 
-        return pattern.sub(replace, value)
+    def redact_auth_arrays(value):
+        prefix_re = re.compile(r'(?i)((?:\\*["\'])authorization(?:\\*["\'])[ \t]*:[ \t]*\[)')
+        out = []
+        pos = 0
+        n = len(value)
+        while pos < n:
+            m = prefix_re.search(value, pos)
+            if not m:
+                out.append(value[pos:])
+                break
+            out.append(value[pos:m.end()])
+            i = m.end()
+            while i < n:
+                ch = value[i]
+                if ch in (']', '\r', '\n'):
+                    out.append(ch)
+                    i += 1
+                    break
+                if ch in ('\\', '"', "'"):
+                    bs_start = i
+                    while i < n and value[i] == '\\':
+                        i += 1
+                    if i < n and value[i] in ('"', "'"):
+                        bs_len = i - bs_start
+                        quote = value[i]
+                        val_start = i + 1
+                        bounds = _scan_quoted_value_end(value, val_start, bs_len, quote)
+                        if bounds is not None:
+                            val_end, close_end = bounds
+                            out.append(value[bs_start:val_start])
+                            out.append(authorization_marker(value[val_start:val_end]))
+                            out.append(value[val_end:close_end])
+                            i = close_end
+                            continue
+                        out.append(value[bs_start:i + 1])
+                        i += 1
+                        continue
+                    out.append(value[bs_start:i])
+                    continue
+                out.append(ch)
+                i += 1
+            pos = i
+        return ''.join(out)
 
     def redact_unquoted_field(value, key_pattern, marker):
         pattern = re.compile(
             rf'(?i)(?P<prefix>\b(?:{key_pattern})\b[ \t]*[:=][ \t]*)'
-            rf'(?!\\?["\'])(?P<value>\[REDACTED_[A-Z_]+\]|[^\s,;{{}}\'"\\&]+)'
+            rf'(?!\\*["\'])(?P<value>\[REDACTED_[A-Z_]+\]|[^\s,;{{}}\'"\\&]+)'
         )
 
         def replace(match):
@@ -147,31 +261,36 @@ def sanitize(text):
 
         return pattern.sub(replace, value)
 
-    def authorization_marker(value):
-        stripped = value.lstrip()
-        if re.match(r'(?i)bearer\b', stripped):
-            return 'Bearer [REDACTED_TOKEN]'
-        if re.match(r'(?i)basic\b', stripped):
-            return 'Basic [REDACTED_SECRET]'
-        return '[REDACTED_TOKEN]'
-
-    # Redact client certs and private keys (EC, OpenSSH, RSA, DSA, ECDSA, Encrypted, etc.)
-    text = re.sub(r'-----BEGIN (?:[A-Z0-9_-]+ )*(?:PRIVATE KEY|CERTIFICATE)-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )*(?:PRIVATE KEY|CERTIFICATE)-----', '[REDACTED_KEY_OR_CERT]', text)
-    # Redact secret environment assignments
-    text = re.sub(r'(?i)(NSC_TOKEN|NSC_PARTNER_TOKEN|NSC_TRUSTED_JWT|NSC_TOKEN_FILE|CACHE_PASSWORD|GPG_PRIVATE_KEY|PASSPHRASE)=([^\s\n]+)', r'\1=[REDACTED]', text)
-    # Redact authorization values in ordinary headers, maps, and JSON-escaped
-    # structured logs. Preserve the scheme so evidence remains useful without
-    # retaining the credential.
-    text = redact_quoted_field(text, r'authorization', '[REDACTED_TOKEN]', authorization_marker)
+    # Redact client certs and private keys (EC, OpenSSH, RSA, DSA, ECDSA, PGP, Encrypted, truncated)
+    text = PEM_COMPLETE_RE.sub('[REDACTED_KEY_OR_CERT]', text)
+    text = PEM_TRUNCATED_RE.sub('[REDACTED_KEY_OR_CERT]', text)
+    # Redact URL userinfo credentials (e.g. https://user:pass@host)
+    text = re.sub(r'(?i)((?:https?|grpcs?|ftp|wss?|socks5h?)://)([^\s/@?#"\'<>]+)@', r'\1[REDACTED_CREDENTIALS]@', text)
+    # Redact secret environment assignments (word-bounded, supports quoted values with spaces)
     text = re.sub(
-        r'(?i)(\bauthorization\b\s*[:=]\s*)(bearer|basic)\s+(?:\[REDACTED_[A-Z_]+\]|[^\s,;{}\'"\\&]+)',
+        r'(?i)\b(NSC_TOKEN|NSC_PARTNER_TOKEN|NSC_TRUSTED_JWT|NSC_TOKEN_FILE|CACHE_PASSWORD|GPG_PRIVATE_KEY|PASSPHRASE|TF_VAR_nsc_[A-Za-z0-9_]+)=(?:"(?:\\.|[^"\\\r\n])*"|\'(?:\\.|[^\'\\\r\n])*\'|[^\s\n,;{}\'"]+)',
+        r'\1=[REDACTED]',
+        text,
+    )
+    # Redact authorization values in JSON arrays, Go metadata maps, headers, and quoted fields.
+    text = redact_auth_arrays(text)
+    text = re.sub(
+        r'(?i)(\bauthorization:\s*\[)(bearer|basic)(\s+)(?:\[REDACTED_[A-Z_]+\]|[^\]\r\n]+)(\])',
+        lambda match: f"{match.group(1)}{match.group(2)}{match.group(3)}"
+        + ('[REDACTED_TOKEN]' if match.group(2).lower() == 'bearer' else '[REDACTED_SECRET]')
+        + match.group(4),
+        text,
+    )
+    text = redact_quoted_field(text, r'authorization', '[REDACTED_TOKEN]', authorization_marker, require_quoted_key=True)
+    text = re.sub(
+        r'(?i)(\bauthorization\b\s*[:=]\s*)(bearer|basic)\s+(?:\[REDACTED_[A-Z_]+\]|[^\s,;{}\'"\\&\]]+)',
         lambda match: f"{match.group(1)}{match.group(2)} " +
         ('[REDACTED_TOKEN]' if match.group(2).lower() == 'bearer' else '[REDACTED_SECRET]'),
         text,
     )
     text = redact_unquoted_field(text, r'authorization', '[REDACTED_TOKEN]')
 
-    token_keys = r'(?:token|(?:bearer|id|session|access|refresh|partner|client|auth)[_-]?token|trusted[_-]?jwt|jwt)'
+    token_keys = r'(?:token|(?:bearer|id|session|access|refresh|partner|client|auth|tenant|workload|oidc)[_-]?token|trusted[_-]?jwt|jwt)'
     private_key_keys = r'(?:(?:api|private|client|signing)[_-]?key(?:[_-]?pem)?)'
     certificate_keys = r'(?:(?:client[_-]?)?cert(?:ificate)?(?:[_-]?pem)?)'
     secret_keys = r'(?:secret|client[_-]?secret|credentials?)'
@@ -187,40 +306,84 @@ def sanitize(text):
         text = redact_quoted_field(text, key_pattern, marker)
         text = redact_unquoted_field(text, key_pattern, marker)
     # Redact Authorization Bearer headers (case-insensitive)
-    text = re.sub(r'(?i)(authorization:\s*bearer\s+)(?:\[REDACTED_TOKEN\]|[^\s,;{}]+)', r'\1[REDACTED_TOKEN]', text)
-    text = re.sub(r'(?i)(bearer\s+)(?:\[REDACTED_TOKEN\]|[a-zA-Z0-9_\-\.]{20,})', r'\1[REDACTED_TOKEN]', text)
-    # Redact Namespace token formats: nsct_, nscw_, nscu_, tok_, st_
-    text = re.sub(r'(?:nsct_|nscw_|nscu_|tok_|st_)[A-Za-z0-9_\-\.]+', '[REDACTED_TOKEN]', text)
+    text = re.sub(r'(?i)(\bauthorization\s*[:=]\s*bearer\s+)(?:\[REDACTED_TOKEN\]|[^\s,;{}\]]+)', r'\1[REDACTED_TOKEN]', text)
+    text = re.sub(r'(?i)\b(bearer\s+)(?:\[REDACTED_TOKEN\]|[a-zA-Z0-9_\-\.+/=]{20,})', r'\1[REDACTED_TOKEN]', text)
+    # Redact Namespace token formats: nsct_, nscw_, nscu_, tok_, st_ (word-bounded)
+    text = re.sub(r'\b(?:nsct_|nscw_|nscu_|tok_|st_)[A-Za-z0-9_\-\.]+', '[REDACTED_TOKEN]', text)
     # Redact standalone JWT tokens (header.payload.sig)
-    text = re.sub(r'eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', '[REDACTED_JWT]', text)
-    # Redact quoted and unquoted passwords (including JSON-escaped quotes)
-    text = re.sub(r'(?i)([\\]*[\"\']?password[\\]*[\"\']?\s*[:=]\s*[\\]*[\"\'])(?:\[REDACTED_PASSWORD\]|[^\r\n]*?)([\\]*[\"\'])', r'\1[REDACTED_PASSWORD]\2', text)
-    text = re.sub(r'(?i)(password\s*[:=]\s*)(?:\[REDACTED_PASSWORD\]|[^\s,;{}\'\"\\\\]+)', r'\1[REDACTED_PASSWORD]', text)
+    text = re.sub(r'\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', '[REDACTED_JWT]', text)
+    # Redact unquoted passwords as final defense-in-depth
+    text = re.sub(r'(?i)\b(password\s*[:=]\s*)(?:\[REDACTED_PASSWORD\]|[^\s,;{}\'"\\]+)', r'\1[REDACTED_PASSWORD]', text)
     return text
 
-sanitized_log = sanitize(raw_content)
-sanitized_log_path = os.path.join(output_dir, 'sanitized-acceptance.log')
-with open(sanitized_log_path, 'w', encoding='utf-8') as f:
-    f.write(sanitized_log)
 
-# 3. Parse Test Results (supports both go test -json and verbose text)
+def sanitize_json_output_chunk(chunk, state_key, pem_states):
+    """Sanitize a decoded go test -json Output string while tracking multiline PEMs
+    per (Package, Test) so parallel test JSON events are never swallowed."""
+    if pem_states.get(state_key):
+        end_m = PEM_END_RE.search(chunk)
+        if end_m:
+            pem_states[state_key] = False
+            remainder = chunk[end_m.end():]
+            return sanitize(remainder) if remainder else ''
+        return ''
+
+    chunk = PEM_COMPLETE_RE.sub('[REDACTED_KEY_OR_CERT]', chunk)
+    begin_m = PEM_BEGIN_RE.search(chunk)
+    if begin_m:
+        pem_states[state_key] = True
+        prefix = sanitize(chunk[:begin_m.start()])
+        trailing_nl = '\n' if chunk.endswith('\n') else ''
+        return f"{prefix}[REDACTED_KEY_OR_CERT]{trailing_nl}"
+
+    return sanitize(chunk)
+
+
+# 3. Parse Test Results FIRST (supports go test -json and verbose text), then sanitize
+# decoded outputs so multiline PEMs or secret env values cannot corrupt JSON event framing.
 tests = [] # list of dicts: {name, package, status, duration, output, failure_msg}
 is_json = False
 package_failures = set()
 
-lines = sanitized_log.strip().split('\n')
-json_events = []
-for line in lines:
-    line_clean = line.strip()
+raw_lines = raw_content.splitlines()
+parsed_records = []
+for raw_line in raw_lines:
+    line_clean = raw_line.strip()
     if line_clean.startswith('{') and line_clean.endswith('}'):
         try:
             ev = json.loads(line_clean)
-            json_events.append(ev)
-            is_json = True
+            if isinstance(ev, dict) and any(k in ev for k in ('Action', 'Package', 'Test', 'Output')):
+                parsed_records.append((True, ev))
+                is_json = True
+                continue
         except Exception:
             pass
+    parsed_records.append((False, raw_line))
 
-if is_json and len(json_events) > 0:
+sanitized_log_path = os.path.join(output_dir, 'sanitized-acceptance.log')
+
+if is_json:
+    pem_states = {}
+    sanitized_lines = []
+    json_events = []
+    for is_ev, item in parsed_records:
+        if is_ev:
+            ev = dict(item)
+            pkg = ev.get('Package', 'github.com/bsuv/terraform-provider-namespace/internal/provider')
+            tname = ev.get('Test', '')
+            if 'Output' in ev and isinstance(ev['Output'], str):
+                ev['Output'] = sanitize_json_output_chunk(ev['Output'], (pkg, tname), pem_states)
+            json_events.append(ev)
+            sanitized_lines.append(json.dumps(ev, separators=(',', ':')))
+        else:
+            sanitized_lines.append(sanitize(item))
+
+    sanitized_log = '\n'.join(sanitized_lines)
+    if raw_content.endswith('\n'):
+        sanitized_log += '\n'
+    with open(sanitized_log_path, 'w', encoding='utf-8') as f:
+        f.write(sanitized_log)
+
     test_outputs = {}
     test_results = {}
     for ev in json_events:
@@ -246,12 +409,16 @@ if is_json and len(json_events) > 0:
                     'package': pkg,
                     'status': action.upper(),
                     'duration': float(elapsed),
-                    'output': ''.join(test_outputs[key]),
+                    'output': sanitize(''.join(test_outputs[key])),
                 }
 
     for key, res in sorted(test_results.items()):
         tests.append(res)
 else:
+    sanitized_log = sanitize(raw_content)
+    with open(sanitized_log_path, 'w', encoding='utf-8') as f:
+        f.write(sanitized_log)
+    lines = sanitized_log.strip().split('\n')
     # Text parsing
     pass_re = re.compile(r'---\s+PASS:\s+(\S+)\s+\(([0-9\.]+)s\)')
     fail_re = re.compile(r'---\s+FAIL:\s+(\S+)\s+\(([0-9\.]+)s\)')

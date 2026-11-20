@@ -152,12 +152,14 @@ func setupRedactionServer(t *testing.T) (*testRedactionFixture, func()) {
 
 	mockSrv.GradleCache.EnsureGradleCacheFunc = func(ctx context.Context, req *gradlev1beta.EnsureGradleCacheRequest) (*gradlev1beta.EnsureGradleCacheResponse, error) {
 		return &gradlev1beta.EnsureGradleCacheResponse{
+			Username: "secret-gradle-cache-user-xyz999",
 			Password: "super-secret-gradle-cache-password-xyz999",
 		}, nil
 	}
 
 	mockSrv.HttpCache.EnsureHttpCacheFunc = func(ctx context.Context, req *httpcachev1beta.EnsureHttpCacheRequest) (*httpcachev1beta.EnsureHttpCacheResponse, error) {
 		return &httpcachev1beta.EnsureHttpCacheResponse{
+			Username: "secret-http-cache-user-abc888",
 			Password: "super-secret-http-cache-password-abc888",
 		}, nil
 	}
@@ -188,7 +190,7 @@ func dialTestConn(t *testing.T, lis *bufconn.Listener) *grpc.ClientConn {
 	ctx := context.Background()
 	conn, err := client.NewConnectionWithEndpointWithTransportCredentials(
 		ctx,
-		"https://passthrough:443",
+		"https://127.0.0.1:443",
 		nil,
 		insecure.NewCredentials(),
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
@@ -295,7 +297,9 @@ func TestGRPCDebugLogging_RedactsResponseSecrets(t *testing.T) {
 		"Mock Server Cert PEM":  fix.testCertPEM,
 		"Private Key Header":    testutil.PEMBeginHeader("EC PRIVATE KEY"),
 		"Certificate Header":    testutil.PEMBeginHeader("CERTIFICATE"),
+		"Plaintext Gradle User": "secret-gradle-cache-user-xyz999",
 		"Plaintext Gradle Pass": "super-secret-gradle-cache-password-xyz999",
+		"Plaintext Http User":   "secret-http-cache-user-abc888",
 		"Plaintext Http Pass":   "super-secret-http-cache-password-abc888",
 	}
 

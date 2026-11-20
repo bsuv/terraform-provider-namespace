@@ -160,7 +160,7 @@ func (r *defaultPolicyResource) Create(ctx context.Context, req resource.CreateR
 	if !plan.DefaultExpiration.IsNull() && !plan.DefaultExpiration.IsUnknown() && plan.DefaultExpiration.ValueString() != "" {
 		durPb, err = tfutil.ParseDuration(plan.DefaultExpiration.ValueString())
 		if err != nil {
-			resp.Diagnostics.AddError("Invalid Duration", fmt.Sprintf("Failed to parse default_expiration: %v", err))
+			tfutil.AddErrorf(&resp.Diagnostics, "Invalid Duration", "Failed to parse default_expiration: %v", err)
 			return
 		}
 	}
@@ -172,7 +172,7 @@ func (r *defaultPolicyResource) Create(ctx context.Context, req resource.CreateR
 	case "EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE":
 		enfEnum = registryv1beta.ExpirationEnforcement_EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE
 	default:
-		resp.Diagnostics.AddError("Invalid Enforcement", fmt.Sprintf("Unsupported expiration_enforcement %q", plan.ExpirationEnforcement.ValueString()))
+		tfutil.AddErrorf(&resp.Diagnostics, "Invalid Enforcement", "Unsupported expiration_enforcement %q", plan.ExpirationEnforcement.ValueString())
 		return
 	}
 
@@ -232,7 +232,7 @@ func (r *defaultPolicyResource) Update(ctx context.Context, req resource.UpdateR
 	if !plan.DefaultExpiration.IsNull() && !plan.DefaultExpiration.IsUnknown() && plan.DefaultExpiration.ValueString() != "" {
 		durPb, err = tfutil.ParseDuration(plan.DefaultExpiration.ValueString())
 		if err != nil {
-			resp.Diagnostics.AddError("Invalid Duration", fmt.Sprintf("Failed to parse default_expiration: %v", err))
+			tfutil.AddErrorf(&resp.Diagnostics, "Invalid Duration", "Failed to parse default_expiration: %v", err)
 			return
 		}
 	}
@@ -244,7 +244,7 @@ func (r *defaultPolicyResource) Update(ctx context.Context, req resource.UpdateR
 	case "EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE":
 		enfEnum = registryv1beta.ExpirationEnforcement_EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE
 	default:
-		resp.Diagnostics.AddError("Invalid Enforcement", fmt.Sprintf("Unsupported expiration_enforcement %q", plan.ExpirationEnforcement.ValueString()))
+		tfutil.AddErrorf(&resp.Diagnostics, "Invalid Enforcement", "Unsupported expiration_enforcement %q", plan.ExpirationEnforcement.ValueString())
 		return
 	}
 
@@ -304,10 +304,11 @@ func (r *defaultPolicyResource) Delete(ctx context.Context, req resource.DeleteR
 
 	if postPolicy.DefaultExpiration != nil ||
 		postPolicy.ExpirationEnforcement != registryv1beta.ExpirationEnforcement_EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Registry Default Policy Reset Verification Failed",
-			fmt.Sprintf("Expected default policy to be reset to no expiration and DO_NOT_ENFORCE, but server returned expiration=%v enforcement=%v",
-				postPolicy.DefaultExpiration, postPolicy.ExpirationEnforcement),
+			"Expected default policy to be reset to no expiration and DO_NOT_ENFORCE, but server returned expiration=%v enforcement=%v",
+			postPolicy.DefaultExpiration, postPolicy.ExpirationEnforcement,
 		)
 		return
 	}
@@ -315,9 +316,10 @@ func (r *defaultPolicyResource) Delete(ctx context.Context, req resource.DeleteR
 
 func (r *defaultPolicyResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	if req.ID != "default" {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Invalid Import ID",
-			fmt.Sprintf("Default policy singleton only supports import with ID 'default', got %q", req.ID),
+			"Default policy singleton only supports import with ID 'default', got %q", req.ID,
 		)
 		return
 	}

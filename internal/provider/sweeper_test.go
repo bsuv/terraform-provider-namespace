@@ -20,8 +20,18 @@ func TestMain(m *testing.M) {
 	resource.TestMain(m)
 }
 
+func redactSweeperErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(client.RedactSecrets(err.Error()))
+}
+
 var (
 	sweepRunnerProfiles = func(region string) (resultErr error) {
+		defer func() {
+			resultErr = redactSweeperErr(resultErr)
+		}()
 		testTenant := strings.TrimSpace(os.Getenv("NSC_TEST_TENANT"))
 		if testTenant == "" {
 			// Guard: Only execute sweeper when dedicated test tenant is explicitly configured
@@ -38,7 +48,7 @@ var (
 			activeTok = tokFile
 		}
 		if err := resolveAndVerifyTenant(activeTok, testTenant); err != nil {
-			return fmt.Errorf("sweeper aborted: authenticated credential does not match NSC_TEST_TENANT %q: %w", testTenant, err)
+			return fmt.Errorf("sweeper aborted: authenticated credential does not match NSC_TEST_TENANT %q: %s", testTenant, client.RedactSecrets(err.Error()))
 		}
 
 		ctx := context.Background()
@@ -50,18 +60,20 @@ var (
 		}
 		cli, err := client.New(ctx, clientCfg)
 		if err != nil {
-			return fmt.Errorf("failed to create client for sweeper: %w", err)
+			return fmt.Errorf("failed to create client for sweeper: %s", client.RedactSecrets(err.Error()))
 		}
 		defer func() {
-			resultErr = errors.Join(resultErr, cli.Close())
+			if closeErr := cli.Close(); closeErr != nil {
+				resultErr = errors.Join(resultErr, redactSweeperErr(closeErr))
+			}
 		}()
 		pCli, err := cli.ProfileClient(ctx)
 		if err != nil {
-			return err
+			return redactSweeperErr(err)
 		}
 		resp, err := pCli.ListProfiles(ctx, &emptypb.Empty{})
 		if err != nil {
-			return fmt.Errorf("failed to list profiles during sweep: %w", err)
+			return fmt.Errorf("failed to list profiles during sweep: %s", client.RedactSecrets(err.Error()))
 		}
 		prefix := testAccRunPrefix()
 		var sweepErrs []error
@@ -71,18 +83,21 @@ var (
 				if strings.HasPrefix(tag, prefix) {
 					_, err := pCli.DeleteProfile(ctx, &githubv1beta.DeleteProfileRequest{ProfileId: p.GetProfileId()})
 					if err != nil && !client.IsNotFound(err) {
-						sweepErrs = append(sweepErrs, fmt.Errorf("failed to sweep runner profile %s (%s): %w", p.GetProfileId(), tag, err))
+						sweepErrs = append(sweepErrs, fmt.Errorf("failed to sweep runner profile %s (%s): %s", p.GetProfileId(), tag, client.RedactSecrets(err.Error())))
 					}
 				}
 			}
 		}
 		if len(sweepErrs) > 0 {
-			return errors.Join(sweepErrs...)
+			return redactSweeperErr(errors.Join(sweepErrs...))
 		}
 		return nil
 	}
 
 	sweepTenantGroups = func(region string) (resultErr error) {
+		defer func() {
+			resultErr = redactSweeperErr(resultErr)
+		}()
 		testTenant := strings.TrimSpace(os.Getenv("NSC_TEST_TENANT"))
 		if testTenant == "" {
 			return nil
@@ -92,24 +107,26 @@ var (
 			return fmt.Errorf("tenant group sweeper aborted: no verified partner credential (NSC_PARTNER_TOKEN) matching NSC_TEST_TENANT %q", testTenant)
 		}
 		if err := resolveAndVerifyTenant(partnerTok, testTenant); err != nil {
-			return fmt.Errorf("tenant group sweeper aborted: authenticated partner credential does not match NSC_TEST_TENANT %q: %w", testTenant, err)
+			return fmt.Errorf("tenant group sweeper aborted: authenticated partner credential does not match NSC_TEST_TENANT %q: %s", testTenant, client.RedactSecrets(err.Error()))
 		}
 
 		ctx := context.Background()
 		cli, err := client.New(ctx, client.Config{Token: partnerTok})
 		if err != nil {
-			return fmt.Errorf("failed to create client for tenant group sweeper: %w", err)
+			return fmt.Errorf("failed to create client for tenant group sweeper: %s", client.RedactSecrets(err.Error()))
 		}
 		defer func() {
-			resultErr = errors.Join(resultErr, cli.Close())
+			if closeErr := cli.Close(); closeErr != nil {
+				resultErr = errors.Join(resultErr, redactSweeperErr(closeErr))
+			}
 		}()
 		tCli, err := cli.TenantClient(ctx)
 		if err != nil {
-			return err
+			return redactSweeperErr(err)
 		}
 		resp, err := tCli.ListTenantGroups(ctx, &iamv1beta.ListTenantGroupsRequest{})
 		if err != nil {
-			return fmt.Errorf("failed to list tenant groups during sweep: %w", err)
+			return fmt.Errorf("failed to list tenant groups during sweep: %s", client.RedactSecrets(err.Error()))
 		}
 		prefix := testAccRunPrefix()
 		var sweepErrs []error
@@ -118,12 +135,12 @@ var (
 			if strings.HasPrefix(name, prefix) {
 				_, err := tCli.DeleteTenantGroup(ctx, &iamv1beta.TenantGroupReference{Name: name})
 				if err != nil && !client.IsNotFound(err) {
-					sweepErrs = append(sweepErrs, fmt.Errorf("failed to sweep tenant group %s: %w", name, err))
+					sweepErrs = append(sweepErrs, fmt.Errorf("failed to sweep tenant group %s: %s", name, client.RedactSecrets(err.Error())))
 				}
 			}
 		}
 		if len(sweepErrs) > 0 {
-			return errors.Join(sweepErrs...)
+			return redactSweeperErr(errors.Join(sweepErrs...))
 		}
 		return nil
 	}

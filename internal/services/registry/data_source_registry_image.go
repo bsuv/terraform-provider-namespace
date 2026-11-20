@@ -138,9 +138,10 @@ func (d *registryImageDataSource) Read(ctx context.Context, req datasource.ReadR
 	})
 	if err != nil {
 		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-			resp.Diagnostics.AddError(
+			tfutil.AddErrorf(
+				&resp.Diagnostics,
 				"Registry Image Not Found",
-				fmt.Sprintf("No registry image found for %s:%s: %s", repo, ref, client.RedactSecrets(st.Message())),
+				"No registry image found for %s:%s: %s", repo, ref, st.Message(),
 			)
 			return
 		}
@@ -150,9 +151,10 @@ func (d *registryImageDataSource) Read(ctx context.Context, req datasource.ReadR
 
 	img := rpcResp.GetImage()
 	if img == nil {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Registry Image Not Found",
-			fmt.Sprintf("No image returned for repository %q and reference %q", repo, ref),
+			"No image returned for repository %q and reference %q", repo, ref,
 		)
 		return
 	}

@@ -1,19 +1,27 @@
 package client
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	endpointutil "github.com/bsuv/terraform-provider-namespace/internal/endpoint"
+	"github.com/bsuv/terraform-provider-namespace/internal/redact"
+	"golang.org/x/net/http/httpproxy"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"namespacelabs.dev/integrations/api"
@@ -100,7 +108,8 @@ func RedactingUnaryInterceptor(writer io.Writer, showRequests, showResponses boo
 		if err == nil {
 			if showResponses {
 				if b, err := json.Marshal(reply); err == nil {
-					EmitLog(writer, "[DEBUG] Response Payload: %s\n", string(b))
+					payload := redactSensitiveRPCResponsePayload(method, string(b))
+					EmitLog(writer, "[DEBUG] Response Payload: %s\n", payload)
 				}
 			}
 		} else {
@@ -109,6 +118,13 @@ func RedactingUnaryInterceptor(writer io.Writer, showRequests, showResponses boo
 
 		return err
 	}
+}
+
+func redactSensitiveRPCResponsePayload(method, payload string) string {
+	if strings.HasSuffix(method, "/EnsureGradleCache") || strings.HasSuffix(method, "/EnsureHttpCache") {
+		return redact.CredentialUsernames(payload)
+	}
+	return payload
 }
 
 // RedactingStreamInterceptor constructs a stream client interceptor that redacts streaming messages.
@@ -183,10 +199,31 @@ func NewConnectionWithEndpointWithTransportCredentials(
 	}
 
 	allowInsecure := shouldAllowInsecurePerRPCCreds(creds)
+	userAgent := fmt.Sprintf("nsc-go/%s", nsc.Version)
 
+	proxyURL, err := resolveValidatedProxyURL(parsed)
+	if err != nil {
+		return nil, err
+	}
+
+	target := (&url.URL{Scheme: "dns", Path: "/" + parsed}).String()
+	dialerOpt := grpc.WithContextDialer(newDirectSSRFSafeDialer())
 	ourOpts := []grpc.DialOption{
-		grpc.WithUserAgent(fmt.Sprintf("nsc-go/%s", nsc.Version)),
+		grpc.WithUserAgent(userAgent),
 		grpc.WithTransportCredentials(creds),
+	}
+	if proxyURL != nil {
+		// Use passthrough with explicit target authority so the validated HTTP/HTTPS
+		// proxy resolves the target (preserving air-gapped corporate proxy support)
+		// while our dialer validates the proxy's resolved IP before connect(2).
+		target = (&url.URL{Scheme: "passthrough", Path: "/" + parsed}).String()
+		ourOpts = append(ourOpts,
+			grpc.WithNoProxy(),
+			grpc.WithAuthority(parsed),
+			grpc.WithContextDialer(newProxySSRFSafeDialer(proxyURL, parsed, userAgent)),
+		)
+	} else {
+		ourOpts = append(ourOpts, dialerOpt)
 	}
 
 	if token != nil {
@@ -221,7 +258,149 @@ func NewConnectionWithEndpointWithTransportCredentials(
 	}
 
 	_ = ctx
-	return grpc.NewClient(parsed, append(ourOpts, opts...)...)
+	return grpc.NewClient(target, append(ourOpts, opts...)...)
+}
+
+func resolveValidatedProxyURL(targetHostPort string) (*url.URL, error) {
+	proxyFunc := httpproxy.FromEnvironment().ProxyFunc()
+	proxyURL, err := proxyFunc(&url.URL{Scheme: "https", Host: targetHostPort})
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy configuration: %w", err)
+	}
+	if proxyURL == nil {
+		return nil, nil
+	}
+
+	scheme := strings.ToLower(proxyURL.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("unsupported proxy scheme %q; only http and https proxies are supported", proxyURL.Scheme)
+	}
+	if err := endpointutil.ValidateHost(proxyURL.Hostname()); err != nil {
+		return nil, fmt.Errorf("proxy host rejected: %w", err)
+	}
+	return proxyURL, nil
+}
+
+func ssrfDialControl(_ string, address string, _ syscall.RawConn) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return fmt.Errorf("dial target %q is not a valid IP:port", address)
+	}
+	return endpointutil.ValidateIP(ap.Addr())
+}
+
+func newSSRFSafeNetDialer() *net.Dialer {
+	return &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   ssrfDialControl,
+	}
+}
+
+func newDirectSSRFSafeDialer() func(context.Context, string) (net.Conn, error) {
+	dialer := newSSRFSafeNetDialer()
+	return func(ctx context.Context, addr string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp", addr)
+	}
+}
+
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) {
+	return b.r.Read(p)
+}
+
+func newProxySSRFSafeDialer(proxyURL *url.URL, targetHostPort, userAgent string) func(context.Context, string) (net.Conn, error) {
+	dialer := newSSRFSafeNetDialer()
+	proxyHost := proxyURL.Hostname()
+	proxyPort := proxyURL.Port()
+	if proxyPort == "" {
+		if strings.EqualFold(proxyURL.Scheme, "https") {
+			proxyPort = "443"
+		} else {
+			proxyPort = "80"
+		}
+	}
+	proxyAddr := net.JoinHostPort(proxyHost, proxyPort)
+
+	return func(ctx context.Context, _ string) (net.Conn, error) {
+		if err := endpointutil.ValidateHost(proxyHost); err != nil {
+			return nil, fmt.Errorf("proxy host rejected: %w", err)
+		}
+
+		conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+		if err != nil {
+			return nil, err
+		}
+
+		if strings.EqualFold(proxyURL.Scheme, "https") {
+			tlsCfg := newDefaultTLSConfig()
+			tlsCfg.ServerName = proxyHost
+			tlsConn := tls.Client(conn, tlsCfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = conn.Close()
+				return nil, fmt.Errorf("proxy TLS handshake failed: %w", err)
+			}
+			conn = tlsConn
+		}
+
+		tunneled, err := performHTTPConnectHandshake(ctx, conn, targetHostPort, userAgent, proxyURL.User)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		return tunneled, nil
+	}
+}
+
+func performHTTPConnectHandshake(ctx context.Context, conn net.Conn, targetHostPort, userAgent string, proxyUser *url.Userinfo) (net.Conn, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+	})
+	defer func() {
+		stopCancel()
+		_ = conn.SetDeadline(time.Time{})
+	}()
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: targetHostPort},
+		Host:   targetHostPort,
+		Header: make(http.Header),
+	}
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+	if proxyUser != nil {
+		u := proxyUser.Username()
+		p, _ := proxyUser.Password()
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(u+":"+p)))
+	}
+
+	if err := req.Write(conn); err != nil {
+		return nil, fmt.Errorf("failed to write HTTP CONNECT request: %w", err)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read HTTP CONNECT response: %w", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("proxy HTTP CONNECT rejected with status %s", resp.Status)
+	}
+	if br.Buffered() > 0 {
+		return &bufferedConn{Conn: conn, r: br}, nil
+	}
+	return conn, nil
 }
 
 // ParseGRPCEndpoint parses and validates an endpoint target for gRPC dialing.

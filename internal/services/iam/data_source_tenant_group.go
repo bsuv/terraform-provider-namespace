@@ -133,7 +133,7 @@ func (d *tenantGroupDataSource) Read(ctx context.Context, req datasource.ReadReq
 	})
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.Diagnostics.AddError("Tenant Group Not Found", fmt.Sprintf("No tenant group found with name %q", name))
+			tfutil.AddErrorf(&resp.Diagnostics, "Tenant Group Not Found", "No tenant group found with name %q", name)
 			return
 		}
 		client.HandleGRPCError(ctx, err, &resp.Diagnostics, "read", "namespace_tenant_group")

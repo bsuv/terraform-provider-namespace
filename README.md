@@ -13,7 +13,7 @@ The **Namespace Cloud Terraform Provider** manages Namespace Cloud runner profil
 ## Requirements
 
 - [Terraform](https://www.terraform.io/downloads.html) `>= 1.11.0` (required for Ephemeral Resources and sensitive variable contracts)
-- [Go](https://go.dev/doc/install) `>= 1.26.7` (for building the provider from source)
+- [Go](https://go.dev/doc/install) `>= 1.26.11` (for building the provider from source)
 
 ---
 

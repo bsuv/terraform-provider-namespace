@@ -179,7 +179,7 @@ func (r *repositoryPolicyResource) Create(ctx context.Context, req resource.Crea
 	if !plan.Expiration.IsNull() && !plan.Expiration.IsUnknown() && plan.Expiration.ValueString() != "" {
 		durPb, err = tfutil.ParseDuration(plan.Expiration.ValueString())
 		if err != nil {
-			resp.Diagnostics.AddError("Invalid Duration", fmt.Sprintf("Failed to parse expiration: %v", err))
+			tfutil.AddErrorf(&resp.Diagnostics, "Invalid Duration", "Failed to parse expiration: %v", err)
 			return
 		}
 	}
@@ -191,7 +191,7 @@ func (r *repositoryPolicyResource) Create(ctx context.Context, req resource.Crea
 	case "EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE":
 		enfEnum = registryv1beta.ExpirationEnforcement_EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE
 	default:
-		resp.Diagnostics.AddError("Invalid Enforcement", fmt.Sprintf("Unsupported expiration_enforcement %q", plan.ExpirationEnforcement.ValueString()))
+		tfutil.AddErrorf(&resp.Diagnostics, "Invalid Enforcement", "Unsupported expiration_enforcement %q", plan.ExpirationEnforcement.ValueString())
 		return
 	}
 
@@ -270,7 +270,7 @@ func (r *repositoryPolicyResource) Update(ctx context.Context, req resource.Upda
 	if !plan.Expiration.IsNull() && !plan.Expiration.IsUnknown() && plan.Expiration.ValueString() != "" {
 		durPb, err = tfutil.ParseDuration(plan.Expiration.ValueString())
 		if err != nil {
-			resp.Diagnostics.AddError("Invalid Duration", fmt.Sprintf("Failed to parse expiration: %v", err))
+			tfutil.AddErrorf(&resp.Diagnostics, "Invalid Duration", "Failed to parse expiration: %v", err)
 			return
 		}
 	}
@@ -282,7 +282,7 @@ func (r *repositoryPolicyResource) Update(ctx context.Context, req resource.Upda
 	case "EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE":
 		enfEnum = registryv1beta.ExpirationEnforcement_EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE
 	default:
-		resp.Diagnostics.AddError("Invalid Enforcement", fmt.Sprintf("Unsupported expiration_enforcement %q", plan.ExpirationEnforcement.ValueString()))
+		tfutil.AddErrorf(&resp.Diagnostics, "Invalid Enforcement", "Unsupported expiration_enforcement %q", plan.ExpirationEnforcement.ValueString())
 		return
 	}
 
@@ -350,10 +350,11 @@ func (r *repositoryPolicyResource) Delete(ctx context.Context, req resource.Dele
 		Repository: repoName,
 	})
 	if err == nil {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Registry Repository Policy Reset Verification Failed",
-			fmt.Sprintf("Expected repository policy override to be deleted (returning NotFound), but policy still exists (repository=%q, revision=%d, expiration=%v, enforcement=%v)",
-				repoName, postPolicy.Revision, postPolicy.Expiration, postPolicy.ExpirationEnforcement),
+			"Expected repository policy override to be deleted (returning NotFound), but policy still exists (repository=%q, revision=%d, expiration=%v, enforcement=%v)",
+			repoName, postPolicy.Revision, postPolicy.Expiration, postPolicy.ExpirationEnforcement,
 		)
 		return
 	}
@@ -375,7 +376,7 @@ func (r *repositoryPolicyResource) ImportState(ctx context.Context, req resource
 	})
 	if err != nil {
 		if client.IsNotFound(err) {
-			resp.Diagnostics.AddError("Resource Not Found", fmt.Sprintf("No repository policy found for repository %q", importID))
+			tfutil.AddErrorf(&resp.Diagnostics, "Resource Not Found", "No repository policy found for repository %q", importID)
 			return
 		}
 		client.HandleGRPCError(ctx, err, &resp.Diagnostics, "read", "namespace_registry_repository_policy")

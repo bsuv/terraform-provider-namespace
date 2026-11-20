@@ -140,6 +140,7 @@ func TestValidEndpoint_CredentialRedaction_Adversarial(t *testing.T) {
 		"username:superSecretPassword123@global.namespaceapis.com:443",
 		"admin:my-token-secret-xyz@eu.compute.namespaceapis.com:8443",
 		"https://service_account_token:nsct_1234567890abcdef@global.namespaceapis.com",
+		"https://user:superSecretPassword123@global.namespaceapis.com:badport",
 	}
 
 	for _, ep := range adversarialEndpoints {
@@ -155,6 +156,31 @@ func TestValidEndpoint_CredentialRedaction_Adversarial(t *testing.T) {
 				strings.Contains(d.Summary(), "superSecretPassword123") ||
 				strings.Contains(d.Summary(), "my-token-secret-xyz") {
 				t.Fatalf("diagnostic leaked credentials for %q: summary=%q detail=%q", ep, d.Summary(), d.Detail())
+			}
+		}
+	}
+}
+
+func TestValidators_RedactSecretsInDiagnostics(t *testing.T) {
+	ctx := context.Background()
+	p := path.Root("attr")
+	secretVal := "nsct_validator_secret_987654321"
+
+	validators := []validator.String{
+		ValidEnum("A", "B"),
+		DurationAtLeast(time.Minute),
+		ValidRFC3339(),
+		ValidISODate(),
+	}
+	for _, v := range validators {
+		var resp validator.StringResponse
+		v.ValidateString(ctx, validator.StringRequest{Path: p, ConfigValue: types.StringValue(secretVal)}, &resp)
+		if !resp.Diagnostics.HasError() {
+			t.Fatalf("expected validator %T to fail for invalid secret input", v)
+		}
+		for _, d := range resp.Diagnostics.Errors() {
+			if strings.Contains(d.Detail(), secretVal) || strings.Contains(d.Summary(), secretVal) {
+				t.Fatalf("validator %T leaked secret %q in diagnostic: %s - %s", v, secretVal, d.Summary(), d.Detail())
 			}
 		}
 	}

@@ -226,7 +226,7 @@ func (d *baseImagesDataSource) Read(ctx context.Context, req datasource.ReadRequ
 	for _, stage := range stages {
 		val, ok := imagesv1beta.ReleaseStage_value[stage]
 		if !ok {
-			resp.Diagnostics.AddError("Invalid Release Stage", fmt.Sprintf("Invalid release stage: %q. Allowed: `STAGE_UNKNOWN`, `PRODUCTION`, `CANARY`", stage))
+			tfutil.AddErrorf(&resp.Diagnostics, "Invalid Release Stage", "Invalid release stage: %q. Allowed: `STAGE_UNKNOWN`, `PRODUCTION`, `CANARY`", stage)
 			return
 		}
 		rpcReq.ReleaseStages = append(rpcReq.ReleaseStages, imagesv1beta.ReleaseStage(val))

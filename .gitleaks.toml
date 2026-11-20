@@ -3,8 +3,14 @@ title = "Gitleaks configuration"
 [extend]
 useDefault = true
 
+[[rules]]
+id = "namespace-cloud-jwt-token"
+description = "Namespace Cloud JWT-bearing credential (nsct_, nscw_, nscu_, tok_, st_)"
+regex = '''\b(?:nsct|nscw|nscu|tok|st)_eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'''
+keywords = ["nsct_", "nscw_", "nscu_", "tok_", "st_"]
+
 [allowlist]
-description = "Ignore agent metadata directory"
+description = "Ignore untracked local agent metadata directory"
 paths = [
     '''(^|/)\.agents/''',
 ]

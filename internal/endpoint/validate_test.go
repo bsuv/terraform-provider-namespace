@@ -70,6 +70,30 @@ func TestValidate_MetadataSSRFAndUnspecifiedBlocked(t *testing.T) {
 		{"IPv6 link-local upper bound", "https://[febf::1]:443", "link-local or metadata"},
 		{"AWS IPv6 IMDS", "https://[fd00:ec2::254]:443", "cloud metadata"},
 		{"AWS IPv6 IMDS bare", "[fd00:ec2::254]", "cloud metadata"},
+		{"Alibaba IPv4 metadata", "https://100.100.100.200:443", "cloud metadata"},
+		{"IPv4-compatible IPv6 metadata", "https://[::169.254.169.254]:443", "link-local or metadata"},
+		{"NAT64 well-known metadata", "https://[64:ff9b::169.254.169.254]:443", "link-local or metadata"},
+		{"NAT64 well-known Alibaba metadata", "https://[64:ff9b::100.100.100.200]:443", "cloud metadata"},
+		{"NAT64 local-use metadata", "https://[64:ff9b:1::169.254.169.254]:443", "link-local or metadata"},
+		{"GCP metadata hostname", "https://metadata.google.internal:443", "cloud metadata hostname"},
+		{"GCP metadata goog", "metadata.goog", "cloud metadata hostname"},
+		{"GCP metadata subdomain", "https://sub.metadata.google.internal", "cloud metadata hostname"},
+		{"AWS instance-data hostname", "https://instance-data:443", "cloud metadata hostname"},
+		{"AWS ec2 instance-data hostname", "https://instance-data.ec2.internal", "cloud metadata hostname"},
+		{"Azure metadata hostname", "https://metadata.azure.internal", "cloud metadata hostname"},
+		{"Non-canonical decimal IPv4", "https://2852039166:443", "non-canonical numeric IP"},
+		{"Non-canonical hex IPv4", "https://0xa9fea9fe:443", "non-canonical numeric IP"},
+		{"Non-canonical octal IPv4", "https://0251.0376.0251.0376:443", "non-canonical numeric IP"},
+		{"Non-canonical shorthand IPv4", "https://169.254.43518:443", "non-canonical numeric IP"},
+		{"Reserved gRPC unix scheme bare", "unix:443", "reserved gRPC resolver scheme"},
+		{"Reserved gRPC unix scheme HTTPS", "https://unix", "reserved gRPC resolver scheme"},
+		{"Reserved gRPC unix scheme HTTPS port", "https://unix:443", "reserved gRPC resolver scheme"},
+		{"Reserved gRPC unix-abstract scheme", "unix-abstract:1234", "reserved gRPC resolver scheme"},
+		{"Reserved gRPC passthrough scheme", "https://passthrough:443", "reserved gRPC resolver scheme"},
+		{"Reserved gRPC dns scheme", "dns:443", "reserved gRPC resolver scheme"},
+		{"Reserved gRPC xds scheme", "xds:443", "reserved gRPC resolver scheme"},
+		{"Reserved gRPC google-c2p scheme", "google-c2p:443", "reserved gRPC resolver scheme"},
+		{"Empty trailing query string", "https://global.namespaceapis.com?", "query parameters"},
 	}
 
 	for _, tc := range blocked {
@@ -108,6 +132,18 @@ func TestValidate_MetadataSSRFAndUnspecifiedBlocked(t *testing.T) {
 				t.Errorf("expected endpoint %q to remain allowed, got: %v", ep, err)
 			}
 		})
+	}
+}
+
+func TestValidate_MalformedURLDoesNotLeakCredentials(t *testing.T) {
+	t.Parallel()
+
+	err := endpoint.Validate("https://user:SuperSecretPass99@global.namespaceapis.com:badport")
+	if err == nil {
+		t.Fatal("expected malformed HTTPS URL with bad port to fail validation")
+	}
+	if strings.Contains(err.Error(), "SuperSecretPass99") || strings.Contains(err.Error(), "user:") {
+		t.Fatalf("endpoint.Validate leaked URL credentials in error: %v", err)
 	}
 }
 

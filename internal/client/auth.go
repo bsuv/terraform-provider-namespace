@@ -18,7 +18,6 @@ import (
 	sessions "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/private/sessions"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"namespacelabs.dev/integrations/api"
 	"namespacelabs.dev/integrations/auth"
@@ -106,7 +105,7 @@ func (s *SessionTokenSource) IssueToken(ctx context.Context, minDuration time.Du
 
 	if s.sessionsClient == nil {
 		conn, err := NewConnectionWithEndpointWithTransportCredentials(
-			ctx, s.iamEndpoint, nil, s.creds, s.dialOpts...,
+			ctx, s.iamEndpoint, StaticTokenSource{Token: s.sessionToken}, s.creds, s.dialOpts...,
 		)
 		if err != nil {
 			return "", fmt.Errorf("failed to connect to IAM endpoint %s: %w", s.iamEndpoint, err)
@@ -123,16 +122,21 @@ func (s *SessionTokenSource) IssueToken(ctx context.Context, minDuration time.Du
 		dur = time.Hour
 	}
 
-	reqCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+s.sessionToken)
-	res, err := s.sessionsClient.IssueTenantTokenFromSession(reqCtx, &sessions.IssueTenantTokenFromSessionRequest{
-		TokenDuration: durationpb.New(dur),
+	res, err := ExecuteTokenIssuance(ctx, func(callCtx context.Context) (*sessions.IssueTenantTokenFromSessionResponse, error) {
+		return s.sessionsClient.IssueTenantTokenFromSession(callCtx, &sessions.IssueTenantTokenFromSessionRequest{
+			TokenDuration: durationpb.New(dur),
+		})
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to issue tenant token from session at %s: %w", s.iamEndpoint, err)
 	}
+	tenantToken := strings.TrimSpace(res.GetTenantToken())
+	if tenantToken == "" {
+		return "", fmt.Errorf("IAM endpoint %s returned an empty tenant token", s.iamEndpoint)
+	}
 
-	s.cachedToken = res.TenantToken
-	if claims, err := auth.ExtractClaims(res.TenantToken); err == nil && claims != nil && claims.ExpiresAt != nil {
+	s.cachedToken = tenantToken
+	if claims, err := auth.ExtractClaims(tenantToken); err == nil && claims != nil && claims.ExpiresAt != nil {
 		s.cachedExpiry = claims.ExpiresAt.Time
 	} else {
 		s.cachedExpiry = time.Now().Add(dur)
@@ -471,10 +475,28 @@ func ResolveTenantFromToken(tokenOrPath string) (string, error) {
 			}
 			var payload tokenFilePayload
 			if err := json.Unmarshal(data, &payload); err == nil {
-				if strings.TrimSpace(payload.BearerToken) != "" {
-					tokenStr = strings.TrimSpace(payload.BearerToken)
-				} else if strings.TrimSpace(payload.SessionToken) != "" {
-					tokenStr = strings.TrimSpace(payload.SessionToken)
+				sTok := strings.TrimSpace(payload.SessionToken)
+				bTok := strings.TrimSpace(payload.BearerToken)
+				// Match LocalTokenSource.IssueToken precedence: session_token takes priority over bearer_token.
+				// If both are present, resolve session_token first and fail closed if bearer_token conflicts.
+				if sTok != "" {
+					sessionTenant, err := resolveTenantFromTokenString(sTok)
+					if err != nil {
+						return "", err
+					}
+					if bTok != "" {
+						bearerTenant, bErr := resolveTenantFromTokenString(bTok)
+						if bErr != nil {
+							return "", fmt.Errorf("token file %q contains both session_token and an unverifiable bearer_token: %w", tokenOrPath, bErr)
+						}
+						if bearerTenant != sessionTenant {
+							return "", fmt.Errorf("token file %q contains conflicting tenants across session_token (%q) and bearer_token (%q)", tokenOrPath, sessionTenant, bearerTenant)
+						}
+					}
+					return sessionTenant, nil
+				}
+				if bTok != "" {
+					tokenStr = bTok
 				} else {
 					tokenStr = trimmed
 				}
@@ -485,6 +507,15 @@ func ResolveTenantFromToken(tokenOrPath string) (string, error) {
 				return "", fmt.Errorf("token file %q is empty", tokenOrPath)
 			}
 		}
+	}
+
+	return resolveTenantFromTokenString(tokenStr)
+}
+
+func resolveTenantFromTokenString(tokenStr string) (string, error) {
+	tokenStr = strings.TrimSpace(tokenStr)
+	if tokenStr == "" {
+		return "", fmt.Errorf("token cannot be empty")
 	}
 
 	// Format 1: Namespace prefixed JWT tokens (nsct_<JWT>, st_<JWT>, nscw_<JWT>)

@@ -180,9 +180,10 @@ func (d *cacheVolumeSummaryDataSource) Read(ctx context.Context, req datasource.
 	})
 	if err != nil {
 		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-			resp.Diagnostics.AddError(
+			tfutil.AddErrorf(
+				&resp.Diagnostics,
 				"Cache Volume Tag Summary Not Found",
-				fmt.Sprintf("No cache volume summary found for tag %q: %s", tag, client.RedactSecrets(st.Message())),
+				"No cache volume summary found for tag %q: %s", tag, st.Message(),
 			)
 			return
 		}
@@ -192,9 +193,10 @@ func (d *cacheVolumeSummaryDataSource) Read(ctx context.Context, req datasource.
 
 	summary := rpcResp.GetSummary()
 	if summary == nil {
-		resp.Diagnostics.AddError(
+		tfutil.AddErrorf(
+			&resp.Diagnostics,
 			"Cache Volume Tag Summary Not Found",
-			fmt.Sprintf("No cache volume summary returned for tag %q", tag),
+			"No cache volume summary returned for tag %q", tag,
 		)
 		return
 	}

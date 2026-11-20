@@ -554,10 +554,11 @@ func (v runnerProfileConfigValidator) ValidateResource(ctx context.Context, req 
 					size := cv.VolumeSizeGB.ValueInt64()
 					res := cv.VolumeReservedSizeGB.ValueInt64()
 					if res >= size {
-						resp.Diagnostics.AddAttributeError(
+						tfutil.AddAttributeErrorf(
+							&resp.Diagnostics,
 							path.Root("cache_volume_settings").AtListIndex(idx).AtName("volume_reserved_size_gb"),
 							"Invalid Cache Volume Reserved Size",
-							fmt.Sprintf("volume_reserved_size_gb (%d) must be strictly less than volume_size_gb (%d)", res, size),
+							"volume_reserved_size_gb (%d) must be strictly less than volume_size_gb (%d)", res, size,
 						)
 					}
 				}
@@ -818,11 +819,11 @@ func (r *runnerProfileResource) ImportState(ctx context.Context, req resource.Im
 	}
 
 	if len(matches) == 0 {
-		resp.Diagnostics.AddError("Resource Not Found", fmt.Sprintf("No runner profile found matching ID or tag %q", importID))
+		tfutil.AddErrorf(&resp.Diagnostics, "Resource Not Found", "No runner profile found matching ID or tag %q", importID)
 		return
 	}
 	if len(matches) > 1 {
-		resp.Diagnostics.AddError("Ambiguous Import Identifier", fmt.Sprintf("Multiple runner profiles matched identifier %q. Use the exact profile_id instead.", importID))
+		tfutil.AddErrorf(&resp.Diagnostics, "Ambiguous Import Identifier", "Multiple runner profiles matched identifier %q. Use the exact profile_id instead.", importID)
 		return
 	}
 
