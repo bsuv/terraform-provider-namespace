@@ -51,9 +51,11 @@ func TestRegistry_Adversarial_DeterministicSortingSameTimestamp(t *testing.T) {
 	ds, schemaResp := setupTestDataSourceRegistryImages(t, srv)
 
 	cfg := registry.RegistryImagesDataSourceModel{
-		ID:         types.StringNull(),
-		Repository: types.StringValue("sort-repo"),
-		Images:     nil,
+		ID:             types.StringNull(),
+		Repository:     types.StringValue("sort-repo"),
+		DeletionFilter: types.StringNull(),
+		ExpiresAt:      types.ObjectNull(registry.ExpiresAtFilterAttrTypes),
+		Images:         nil,
 	}
 
 	configState := tfsdk.State{Schema: schemaResp.Schema}
@@ -135,7 +137,9 @@ func TestRegistry_Adversarial_ConcurrentReadStress(t *testing.T) {
 				Digest:     types.StringNull(),
 				CreatedAt:  types.StringNull(),
 				ExpiresAt:  types.StringNull(),
+				DeletedAt:  types.StringNull(),
 				SizeBytes:  types.Int64Null(),
+				Labels:     types.MapNull(types.StringType),
 				Tags:       nil,
 			}
 			st := tfsdk.State{Schema: schemaSingle.Schema}
@@ -152,9 +156,11 @@ func TestRegistry_Adversarial_ConcurrentReadStress(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			cfg := registry.RegistryImagesDataSourceModel{
-				ID:         types.StringNull(),
-				Repository: types.StringValue("stress-repo"),
-				Images:     nil,
+				ID:             types.StringNull(),
+				Repository:     types.StringValue("stress-repo"),
+				DeletionFilter: types.StringNull(),
+				ExpiresAt:      types.ObjectNull(registry.ExpiresAtFilterAttrTypes),
+				Images:         nil,
 			}
 			st := tfsdk.State{Schema: schemaList.Schema}
 			_ = st.Set(ctx, &cfg)

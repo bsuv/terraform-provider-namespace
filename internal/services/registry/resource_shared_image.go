@@ -263,8 +263,8 @@ func mapSharedImageToModel(pb *registryv1beta.SharedImage, sourceRepo, sourceDig
 
 	suffixVal := types.StringValue(pb.Suffix)
 	if pb.Suffix == "" {
-		if !current.Suffix.IsNull() && !current.Suffix.IsUnknown() && current.Suffix.ValueString() == "" {
-			suffixVal = types.StringValue("")
+		if !current.Suffix.IsNull() && !current.Suffix.IsUnknown() {
+			suffixVal = current.Suffix
 		} else {
 			suffixVal = types.StringNull()
 		}

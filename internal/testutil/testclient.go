@@ -7,7 +7,6 @@ import (
 	"github.com/bsuv/terraform-provider-namespace/internal/client"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 )
 
 // NewTestClient creates an initialized *client.Client configured to connect to
@@ -16,7 +15,7 @@ func NewTestClient(t *testing.T, srv *MockServer) *client.Client {
 	t.Helper()
 
 	// Disable mandatory transport security enforcement for bufconn in-memory tests
-	grpcapi.RequireTransportSecurity = false
+	client.RequireTransportSecurity = false
 
 	srv.Start()
 	t.Cleanup(func() {

@@ -71,5 +71,5 @@ Required:
 
 Required:
 
-- `policy_type` (String) Policy type identifier (e.g. 'namespace.cloud.iam.v1beta.AdminPolicy').
+- `policy_type` (String) Policy type identifier (e.g. 'namespace.cloud.compute.v1beta.UsagePolicy').
 - `value` (String) JSON or protobuf serialized policy value.

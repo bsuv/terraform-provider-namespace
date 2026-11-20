@@ -50,7 +50,6 @@ resource "namespace_github_runner_profile" "high_perf_builder" {
 
   cache_volume_settings = [
     {
-      volume_tag                   = "build-cache"
       volume_size_gb               = 100
       volume_reserved_size_gb      = 10
       bundled_container_cache      = true
@@ -93,9 +92,10 @@ resource "namespace_github_runner_profile" "high_perf_builder" {
 
 ### Optional
 
-- `access_level` (String) Controls which Namespace features the runner workload can access (`ACCESS_LEVEL_UNSPECIFIED`, `ACCESS_LEVEL_PERMISSIVE`, `ACCESS_LEVEL_LIMITED`, `ACCESS_LEVEL_RESTRICTED`).
+- `access_level` (String) Controls which Namespace features the runner workload can access (`ACCESS_LEVEL_UNSPECIFIED`, `ACCESS_LEVEL_PERMISSIVE`, `ACCESS_LEVEL_LIMITED`, `ACCESS_LEVEL_RESTRICTED`, `ACCESS_LEVEL_CUSTOM`).
 - `builder_mode` (String) Build execution caching mode (`BUILDER_MODE_UNSPECIFIED`, `USE_REMOTE_BUILDER`, `USE_LOCAL_CACHE`, `NO_CACHING`).
 - `cache_volume_settings` (Attributes List) Persistent cache volume attachments for this runner profile. (see [below for nested schema](#nestedatt--cache_volume_settings))
+- `custom_permissions` (Attributes List) Granular IAM permission grants when `access_level` is `ACCESS_LEVEL_CUSTOM`. (see [below for nested schema](#nestedatt--custom_permissions))
 - `custom_runner_image_spec` (Attributes) Custom runner image specification (Ubuntu APT packages and/or inline Dockerfile). (see [below for nested schema](#nestedatt--custom_runner_image_spec))
 - `description` (String) Human-friendly description of the runner profile.
 - `emoji` (String) Optional emoji visually identifying the profile in the Namespace UI.
@@ -119,7 +119,6 @@ resource "namespace_github_runner_profile" "high_perf_builder" {
 Required:
 
 - `volume_size_gb` (Number) Total size of the cache volume in gigabytes.
-- `volume_tag` (String) Unique identifier for this cache volume within the profile.
 
 Optional:
 
@@ -130,6 +129,16 @@ Optional:
 - `bundled_runner_actions_cache` (Boolean) Whether to bundle GitHub Actions cache in this volume.
 - `bundled_runner_tools_cache` (Boolean) Whether to bundle runner tool cache in this volume.
 - `volume_reserved_size_gb` (Number) Reserved size that cannot be used by the cache, in gigabytes.
+
+
+<a id="nestedatt--custom_permissions"></a>
+### Nested Schema for `custom_permissions`
+
+Required:
+
+- `actions` (List of String) List of allowed action strings.
+- `resource_id` (String) Target resource identifier, or empty string `""` for all resources of this type.
+- `resource_type` (String) Resource type identifier (e.g. `vault/object`, `cache/bazel`).
 
 
 <a id="nestedatt--custom_runner_image_spec"></a>
@@ -164,7 +173,7 @@ Optional:
 
 - `machine_arch` (String) Architecture of the instance (`amd64`, `arm64`).
 - `memory_megabytes` (Number) Memory in megabytes.
-- `os` (String) Compute OS family (`linux`, `macos`).
+- `os` (String) Compute OS family (`linux`, `macos`, `windows`).
 - `selectors` (Attributes List) Node label selectors for instance placement. (see [below for nested schema](#nestedatt--instance_shape--selectors))
 - `virtual_cpu` (Number) Number of virtual CPUs.
 

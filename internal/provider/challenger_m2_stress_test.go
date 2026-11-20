@@ -23,7 +23,6 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 
 	"github.com/bsuv/terraform-provider-namespace/internal/client"
 	"github.com/bsuv/terraform-provider-namespace/internal/services/github"
@@ -139,7 +138,7 @@ func TestChallenger2_Stress_ConcurrencyConflict_MultipleUpdates(t *testing.T) {
 func TestChallenger2_Stress_ConcurrencyConflictInterceptor_EndToEnd(t *testing.T) {
 	ctx := context.Background()
 	srv := testutil.NewMockServer()
-	grpcapi.RequireTransportSecurity = false
+	client.RequireTransportSecurity = false
 	srv.Start()
 	t.Cleanup(func() { srv.Stop() })
 
@@ -449,9 +448,11 @@ func TestChallenger2_Stress_RegistryImagesDataSource_DeterminismAndBoundaries(t 
 	d, schemaResp := setupTestDataSourceRegistryImages(t, srv)
 
 	cfgEmpty := registry.RegistryImagesDataSourceModel{
-		ID:         types.StringNull(),
-		Repository: types.StringValue("empty-repo"),
-		Images:     nil,
+		ID:             types.StringNull(),
+		Repository:     types.StringValue("empty-repo"),
+		DeletionFilter: types.StringNull(),
+		ExpiresAt:      types.ObjectNull(registry.ExpiresAtFilterAttrTypes),
+		Images:         nil,
 	}
 	configState := tfsdk.State{Schema: schemaResp.Schema}
 	_ = configState.Set(ctx, &cfgEmpty)
@@ -486,9 +487,11 @@ func TestChallenger2_Stress_RegistryImagesDataSource_DeterminismAndBoundaries(t 
 	}
 
 	cfgSort := registry.RegistryImagesDataSourceModel{
-		ID:         types.StringNull(),
-		Repository: types.StringValue("sort-repo"),
-		Images:     nil,
+		ID:             types.StringNull(),
+		Repository:     types.StringValue("sort-repo"),
+		DeletionFilter: types.StringNull(),
+		ExpiresAt:      types.ObjectNull(registry.ExpiresAtFilterAttrTypes),
+		Images:         nil,
 	}
 	configState2 := tfsdk.State{Schema: schemaResp.Schema}
 	_ = configState2.Set(ctx, &cfgSort)

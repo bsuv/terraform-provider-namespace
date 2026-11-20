@@ -116,7 +116,7 @@ resource "namespace_tenant_group" "empty_pol" {
   policies = [
     {
       policy = "namespace.cloud.compute.v1beta.UsagePolicy"
-      value  = "{\"max_instances\": 10}"
+      value  = "{\"concurrency_limits\":{\"max_instance_count\":10}}"
     }
   ]
 }

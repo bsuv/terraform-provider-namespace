@@ -112,7 +112,7 @@ func (e *tenantTokenEphemeralResource) Schema(ctx context.Context, req ephemeral
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"policy_type": schema.StringAttribute{
-							Description: "Policy type identifier (e.g. 'namespace.cloud.iam.v1beta.AdminPolicy').",
+							Description: "Policy type identifier (e.g. 'namespace.cloud.compute.v1beta.UsagePolicy').",
 							Required:    true,
 							Validators: []validator.String{
 								tfutil.NonEmptyString(),
@@ -218,13 +218,32 @@ func (e *tenantTokenEphemeralResource) Open(ctx context.Context, req ephemeral.O
 	}
 
 	if !data.Policies.IsNull() && !data.Policies.IsUnknown() {
-		var policies []TenantTokenPolicyModel
-		d := data.Policies.ElementsAs(ctx, &policies, false)
+		var policyObjs []types.Object
+		d := data.Policies.ElementsAs(ctx, &policyObjs, false)
 		resp.Diagnostics.Append(d...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		for _, p := range policies {
+		for _, pObj := range policyObjs {
+			if pObj.IsNull() {
+				continue
+			}
+			if pObj.IsUnknown() {
+				if req.ClientCapabilities.DeferralAllowed {
+					resp.Deferred = &ephemeral.Deferred{
+						Reason: ephemeral.DeferredReasonEphemeralResourceConfigUnknown,
+					}
+					return
+				}
+				resp.Diagnostics.AddError("Unknown Policy Configuration", "Policy configuration contains unknown values and cannot be resolved.")
+				return
+			}
+			var p TenantTokenPolicyModel
+			d := pObj.As(ctx, &p, basetypes.ObjectAsOptions{})
+			resp.Diagnostics.Append(d...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
 			if p.PolicyType.IsUnknown() || p.Value.IsUnknown() {
 				if req.ClientCapabilities.DeferralAllowed {
 					resp.Deferred = &ephemeral.Deferred{
@@ -262,15 +281,34 @@ func (e *tenantTokenEphemeralResource) Open(ctx context.Context, req ephemeral.O
 		}
 
 		if !accessModel.Grants.IsNull() {
-			var grants []PermissionModel
-			d := accessModel.Grants.ElementsAs(ctx, &grants, false)
+			var grantObjs []types.Object
+			d := accessModel.Grants.ElementsAs(ctx, &grantObjs, false)
 			resp.Diagnostics.Append(d...)
 			if resp.Diagnostics.HasError() {
 				return
 			}
 
 			accessPolicy := &iamv1beta.AccessPolicy{}
-			for _, g := range grants {
+			for _, gObj := range grantObjs {
+				if gObj.IsNull() {
+					continue
+				}
+				if gObj.IsUnknown() {
+					if req.ClientCapabilities.DeferralAllowed {
+						resp.Deferred = &ephemeral.Deferred{
+							Reason: ephemeral.DeferredReasonEphemeralResourceConfigUnknown,
+						}
+						return
+					}
+					resp.Diagnostics.AddError("Unknown Access Grant Configuration", "Access grant contains unknown values and cannot be resolved.")
+					return
+				}
+				var g PermissionModel
+				d := gObj.As(ctx, &g, basetypes.ObjectAsOptions{})
+				resp.Diagnostics.Append(d...)
+				if resp.Diagnostics.HasError() {
+					return
+				}
 				if g.ResourceType.IsUnknown() || g.ResourceID.IsUnknown() || g.Actions.IsUnknown() {
 					if req.ClientCapabilities.DeferralAllowed {
 						resp.Deferred = &ephemeral.Deferred{
@@ -291,6 +329,9 @@ func (e *tenantTokenEphemeralResource) Open(ctx context.Context, req ephemeral.O
 						return
 					}
 					for _, act := range actionVals {
+						if act.IsNull() {
+							continue
+						}
 						if act.IsUnknown() {
 							if req.ClientCapabilities.DeferralAllowed {
 								resp.Deferred = &ephemeral.Deferred{

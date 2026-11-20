@@ -123,6 +123,26 @@ func TestRepositoryPolicyResource_ConfigValidators(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("unexpected error for valid config: %v", resp.Diagnostics)
 	}
+
+	// 3. Valid: ENFORCE with unknown expiration (e.g. var.* or computed ref)
+	unknownConfig := registry.RepositoryPolicyResourceModel{
+		ID:                    types.StringUnknown(),
+		Repository:            types.StringValue("my-repo"),
+		Revision:              types.Int64Unknown(),
+		Expiration:            types.StringUnknown(),
+		ExpirationEnforcement: types.StringValue("EXPIRATION_ENFORCEMENT_ENFORCE"),
+	}
+	state = tfsdk.State{Schema: schemaResp.Schema}
+	_ = state.Set(ctx, &unknownConfig)
+
+	resp = resource.ValidateConfigResponse{}
+	validators[0].ValidateResource(ctx, resource.ValidateConfigRequest{
+		Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: state.Raw},
+	}, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected error for unknown expiration config: %v", resp.Diagnostics)
+	}
 }
 
 func TestRepositoryPolicyResource_Configure_InvalidType(t *testing.T) {

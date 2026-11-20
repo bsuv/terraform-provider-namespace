@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
 	"github.com/bsuv/terraform-provider-namespace/internal/redact"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -102,6 +103,17 @@ func HandleGRPCError(ctx context.Context, err error, diags *diag.Diagnostics, ac
 			for _, fv := range d.FieldViolations {
 				detailMsgs = append(detailMsgs, fmt.Sprintf("Field %q: %s", fv.Field, fv.Description))
 			}
+		case *iamv1beta.PermissionDeniedError:
+			for _, p := range d.GetMissingAccessPermissions() {
+				if p == nil {
+					continue
+				}
+				if p.GetResourceId() != "" {
+					detailMsgs = append(detailMsgs, fmt.Sprintf("Missing permission: resource_type=%q, resource_id=%q, action=%q", p.GetResourceType(), p.GetResourceId(), p.GetAction()))
+				} else {
+					detailMsgs = append(detailMsgs, fmt.Sprintf("Missing permission: resource_type=%q, action=%q", p.GetResourceType(), p.GetAction()))
+				}
+			}
 		}
 	}
 
@@ -121,18 +133,18 @@ func HandleGRPCError(ctx context.Context, err error, diags *diag.Diagnostics, ac
 	case codes.FailedPrecondition, codes.Aborted:
 		if isRevisionConflict {
 			summary = fmt.Sprintf("Concurrency Conflict on %s during %s", resourceName, action)
-			detail = fmt.Sprintf("The resource was modified outside of Terraform: %s. Run `terraform refresh` and re-plan.", st.Message())
+			detail = fmt.Sprintf("The resource was modified outside of Terraform: %s. Run `terraform refresh` and re-plan.%s", st.Message(), detailsStr)
 		}
 	case codes.AlreadyExists:
 		summary = fmt.Sprintf("%s Already Exists during %s", resourceName, action)
 		if resourceName == "namespace_registry_shared_image" {
-			detail = fmt.Sprintf("A shared image reference with identical parameters already exists: %s. Shared images cannot be imported because source repository information is not returned by the API; choose a distinct suffix or unshare the existing image.", st.Message())
+			detail = fmt.Sprintf("A shared image reference with identical parameters already exists: %s. Shared images cannot be imported because source repository information is not returned by the API; choose a distinct suffix or unshare the existing image.%s", st.Message(), detailsStr)
 		} else {
-			detail = fmt.Sprintf("A resource with the same identifier already exists remotely: %s. Use `terraform import` to manage it.", st.Message())
+			detail = fmt.Sprintf("A resource with the same identifier already exists remotely: %s. Use `terraform import` to manage it.%s", st.Message(), detailsStr)
 		}
 	case codes.Unauthenticated, codes.PermissionDenied:
 		summary = fmt.Sprintf("Authorization Failure during %s %s", action, resourceName)
-		detail = fmt.Sprintf("Namespace API returned %s: %s. Verify provider credentials and IAM permissions.", st.Code(), st.Message())
+		detail = fmt.Sprintf("Namespace API returned %s: %s. Verify provider credentials and IAM permissions.%s", st.Code(), st.Message(), detailsStr)
 	}
 
 	diags.AddError(summary, RedactSecrets(detail))

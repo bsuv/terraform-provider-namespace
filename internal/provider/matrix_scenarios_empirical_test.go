@@ -191,6 +191,7 @@ func makeRunnerProfilePlanModel(tag, description string, swapMB int64) github.Ru
 		SwapSizeMB:            swapVal,
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  types.ListNull(types.StringType),
 		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
 		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
@@ -735,9 +736,11 @@ func TestChallenger_MatrixScenario5_RegistryImagesDataSource_MultiPagePagination
 	d, schemaResp := setupTestDataSourceRegistryImages(t, srv)
 
 	cfg := registry.RegistryImagesDataSourceModel{
-		ID:         types.StringNull(),
-		Repository: types.StringValue(repoName),
-		Images:     nil,
+		ID:             types.StringNull(),
+		Repository:     types.StringValue(repoName),
+		DeletionFilter: types.StringNull(),
+		ExpiresAt:      types.ObjectNull(registry.ExpiresAtFilterAttrTypes),
+		Images:         nil,
 	}
 
 	configState := tfsdk.State{Schema: schemaResp.Schema}

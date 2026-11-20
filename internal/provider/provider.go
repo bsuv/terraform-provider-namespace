@@ -181,7 +181,7 @@ func (p *NamespaceProvider) Configure(ctx context.Context, req provider.Configur
 			resp.Diagnostics.AddWarning(
 				"Custom Untrusted Endpoint Configured",
 				client.RedactSecrets(fmt.Sprintf(
-					"Resolved %s (%q) points outside trusted Namespace domains (namespaceapis.com, namespace.so, namespacelabs.dev) and loopback addresses. Provider Bearer credentials will be transmitted to this host over TLS; verify you trust this endpoint or proxy.",
+					"Resolved %s (%q) points outside trusted Namespace domains (namespaceapis.com, namespaceapi.com, namespace.so, namespacelabs.dev) and loopback addresses. Provider Bearer credentials will be transmitted to this host over TLS; verify you trust this endpoint or proxy.",
 					ep.name, ep.value,
 				)),
 			)

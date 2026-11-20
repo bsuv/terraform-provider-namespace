@@ -2,7 +2,10 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"sort"
+	"strings"
 	"sync"
 
 	builderv1betagrpc "buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/cloud/builder/v1beta/builderv1betagrpc"
@@ -24,12 +27,15 @@ import (
 	httpcachev1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/integrations/httpcache/v1beta"
 	registryv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/registry/v1beta"
 	vaultv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/vault/v1beta"
+	stdlib "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/stdlib"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const bufSize = 1024 * 1024
@@ -189,6 +195,98 @@ func (m *MockProfileServiceServer) RebuildProfileImage(ctx context.Context, req 
 		return m.RebuildProfileImageFunc(ctx, req)
 	}
 	return &githubv1beta.RebuildProfileImageResponse{}, nil
+}
+
+// EnableStatefulProfiles configures in-memory stateful CRUD handlers on MockProfileServiceServer
+// using deep-copied protobuf messages and validating RunnerProfileSpec fields including
+// AccessLevel and CustomPermissions. Nil-hook defaults remain unchanged unless this is called.
+func (m *MockProfileServiceServer) EnableStatefulProfiles() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	profiles := make(map[string]*githubv1beta.RunnerProfileWithStatus)
+	var seq int64
+
+	m.CreateProfileFunc = func(ctx context.Context, req *githubv1beta.CreateProfileRequest) (*githubv1beta.CreateProfileResponse, error) {
+		if err := validateRunnerProfileSpec(req.GetSpec()); err != nil {
+			return nil, err
+		}
+		seq++
+		id := fmt.Sprintf("prof_%d", seq)
+		now := timestamppb.Now()
+		stored := &githubv1beta.RunnerProfileWithStatus{
+			ProfileId: id,
+			Version:   1,
+			CreatedAt: now,
+			UpdatedAt: now,
+			Spec:      proto.Clone(req.GetSpec()).(*githubv1beta.RunnerProfileSpec),
+		}
+		profiles[id] = stored
+		return &githubv1beta.CreateProfileResponse{
+			Profile: proto.Clone(stored).(*githubv1beta.RunnerProfileWithStatus),
+		}, nil
+	}
+
+	m.UpdateProfileFunc = func(ctx context.Context, req *githubv1beta.UpdateProfileRequest) (*githubv1beta.UpdateProfileResponse, error) {
+		existing, ok := profiles[req.GetProfileId()]
+		if !ok {
+			return nil, status.Errorf(codes.NotFound, "runner profile %q not found", req.GetProfileId())
+		}
+		if req.GetUpdateVersion() != existing.GetVersion() {
+			return nil, status.Errorf(codes.FailedPrecondition, "version mismatch: got %d, want %d", req.GetUpdateVersion(), existing.GetVersion())
+		}
+		if err := validateRunnerProfileSpec(req.GetSpec()); err != nil {
+			return nil, err
+		}
+		updated := &githubv1beta.RunnerProfileWithStatus{
+			ProfileId: existing.GetProfileId(),
+			Version:   existing.GetVersion() + 1,
+			CreatedAt: proto.Clone(existing.GetCreatedAt()).(*timestamppb.Timestamp),
+			UpdatedAt: timestamppb.Now(),
+			Spec:      proto.Clone(req.GetSpec()).(*githubv1beta.RunnerProfileSpec),
+			Status:    proto.Clone(existing.GetStatus()).(*githubv1beta.RunnerProfileStatus),
+		}
+		profiles[req.GetProfileId()] = updated
+		return &githubv1beta.UpdateProfileResponse{
+			Profile: proto.Clone(updated).(*githubv1beta.RunnerProfileWithStatus),
+		}, nil
+	}
+
+	m.ListProfilesFunc = func(ctx context.Context, req *emptypb.Empty) (*githubv1beta.ListProfilesResponse, error) {
+		ids := make([]string, 0, len(profiles))
+		for id := range profiles {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		out := make([]*githubv1beta.RunnerProfileWithStatus, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, proto.Clone(profiles[id]).(*githubv1beta.RunnerProfileWithStatus))
+		}
+		return &githubv1beta.ListProfilesResponse{Profiles: out}, nil
+	}
+
+	m.DeleteProfileFunc = func(ctx context.Context, req *githubv1beta.DeleteProfileRequest) (*emptypb.Empty, error) {
+		if _, ok := profiles[req.GetProfileId()]; !ok {
+			return nil, status.Errorf(codes.NotFound, "runner profile %q not found", req.GetProfileId())
+		}
+		delete(profiles, req.GetProfileId())
+		return &emptypb.Empty{}, nil
+	}
+}
+
+func validateRunnerProfileSpec(spec *githubv1beta.RunnerProfileSpec) error {
+	if spec == nil || strings.TrimSpace(spec.GetTag()) == "" {
+		return status.Error(codes.InvalidArgument, "runner profile spec tag must be non-empty")
+	}
+	if _, ok := githubv1beta.AccessLevel_name[int32(spec.GetAccessLevel())]; !ok {
+		return status.Errorf(codes.InvalidArgument, "unsupported access_level enum %d", spec.GetAccessLevel())
+	}
+	for i, perm := range spec.GetCustomPermissions() {
+		if perm == nil || strings.TrimSpace(perm.GetResourceType()) == "" {
+			return status.Errorf(codes.InvalidArgument, "custom_permissions[%d].resource_type must be non-empty", i)
+		}
+	}
+	return nil
 }
 
 // MockImageServiceServer implements ImageServiceServer with hook functions.
@@ -377,6 +475,184 @@ func (m *MockContainerRegistryServiceServer) ListImages(ctx context.Context, req
 		return m.ListImagesFunc(ctx, req)
 	}
 	return nil, status.Error(codes.Unimplemented, "method ListImages not implemented")
+}
+
+// EnableStatefulImages configures GetImageFunc and ListImagesFunc on this mock server
+// with an in-memory image store supporting proto-faithful DeletionFilter, ExpiresAt,
+// CreatedAt, MatchRepository, continuation cursor validation, and deterministic pagination.
+func (m *MockContainerRegistryServiceServer) EnableStatefulImages(seed []*registryv1beta.Image, pageSize int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+
+	stored := make([]*registryv1beta.Image, 0, len(seed))
+	for _, img := range seed {
+		if img == nil {
+			continue
+		}
+		stored = append(stored, proto.Clone(img).(*registryv1beta.Image))
+	}
+
+	type imageCursorState struct {
+		filtered       []*registryv1beta.Image
+		offset         int
+		deletionFilter registryv1beta.ListImagesRequest_DeletionFilter
+	}
+
+	var stateMu sync.Mutex
+	cursors := make(map[string]imageCursorState)
+	var cursorSeq int
+
+	matchesStringMatcher := func(matcher *stdlib.StringMatcher, value string) bool {
+		if matcher == nil || len(matcher.GetValues()) == 0 {
+			return true
+		}
+		switch matcher.GetOp() {
+		case stdlib.StringMatcher_IS_ANY_OF:
+			for _, candidate := range matcher.GetValues() {
+				if value == candidate {
+					return true
+				}
+			}
+			return false
+		case stdlib.StringMatcher_IS_NOT:
+			for _, candidate := range matcher.GetValues() {
+				if value == candidate {
+					return false
+				}
+			}
+			return true
+		default:
+			return true
+		}
+	}
+
+	matchesTimestampRange := func(tr *stdlib.TimestampRange, ts *timestamppb.Timestamp) bool {
+		if tr == nil || (tr.GetAfter() == nil && tr.GetBefore() == nil) {
+			return true
+		}
+		if ts == nil || !ts.IsValid() {
+			return false
+		}
+		t := ts.AsTime()
+		if after := tr.GetAfter(); after != nil {
+			if !after.IsValid() || !t.After(after.AsTime()) {
+				return false
+			}
+		}
+		if before := tr.GetBefore(); before != nil {
+			if !before.IsValid() || !t.Before(before.AsTime()) {
+				return false
+			}
+		}
+		return true
+	}
+
+	m.GetImageFunc = func(ctx context.Context, req *registryv1beta.GetImageRequest) (*registryv1beta.GetImageResponse, error) {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+
+		repo := req.GetRepository()
+		ref := req.GetReference()
+		for _, img := range stored {
+			if img.GetRepository() != repo {
+				continue
+			}
+			if img.GetDigest() == ref {
+				return &registryv1beta.GetImageResponse{
+					Image: proto.Clone(img).(*registryv1beta.Image),
+				}, nil
+			}
+			for _, tag := range img.GetTags() {
+				if tag == ref {
+					return &registryv1beta.GetImageResponse{
+						Image: proto.Clone(img).(*registryv1beta.Image),
+					}, nil
+				}
+			}
+		}
+		return nil, status.Errorf(codes.NotFound, "image %s:%s not found", repo, ref)
+	}
+
+	m.ListImagesFunc = func(ctx context.Context, req *registryv1beta.ListImagesRequest) (*registryv1beta.ListImagesResponse, error) {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+
+		var filtered []*registryv1beta.Image
+		var offset int
+		var effectiveFilter registryv1beta.ListImagesRequest_DeletionFilter
+
+		cursorToken := string(req.GetPaginationCursor())
+		if cursorToken != "" {
+			cs, ok := cursors[cursorToken]
+			if !ok {
+				return nil, status.Errorf(codes.InvalidArgument, "invalid pagination cursor %q", cursorToken)
+			}
+			if req.GetDeletionFilter() != registryv1beta.ListImagesRequest_DELETION_FILTER_UNSPECIFIED &&
+				req.GetDeletionFilter() != cs.deletionFilter {
+				return nil, status.Errorf(codes.InvalidArgument, "continuation deletion_filter %v does not match initial %v", req.GetDeletionFilter(), cs.deletionFilter)
+			}
+			filtered = cs.filtered
+			offset = cs.offset
+			effectiveFilter = cs.deletionFilter
+		} else {
+			effectiveFilter = req.GetDeletionFilter()
+			for _, img := range stored {
+				if !matchesStringMatcher(req.GetMatchRepository(), img.GetRepository()) {
+					continue
+				}
+				if effectiveFilter == registryv1beta.ListImagesRequest_EXCLUDE_DELETED && img.GetDeletedAt() != nil {
+					continue
+				}
+				if !matchesTimestampRange(req.GetExpiresAt(), img.GetExpiresAt()) {
+					continue
+				}
+				if !matchesTimestampRange(req.GetCreatedAt(), img.GetCreatedAt()) {
+					continue
+				}
+				filtered = append(filtered, img)
+			}
+		}
+
+		limit := pageSize
+		if maxEntries := int(req.GetMaxEntries()); maxEntries > 0 && maxEntries < limit {
+			limit = maxEntries
+		}
+
+		if offset >= len(filtered) {
+			return &registryv1beta.ListImagesResponse{}, nil
+		}
+
+		end := offset + limit
+		if end > len(filtered) {
+			end = len(filtered)
+		}
+
+		page := make([]*registryv1beta.Image, 0, end-offset)
+		for _, img := range filtered[offset:end] {
+			page = append(page, proto.Clone(img).(*registryv1beta.Image))
+		}
+
+		var nextCursor []byte
+		if end < len(filtered) {
+			cursorSeq++
+			tok := fmt.Sprintf("img-cursor-%d", cursorSeq)
+			cursors[tok] = imageCursorState{
+				filtered:       filtered,
+				offset:         end,
+				deletionFilter: effectiveFilter,
+			}
+			nextCursor = []byte(tok)
+		}
+
+		return &registryv1beta.ListImagesResponse{
+			Images:           page,
+			PaginationCursor: nextCursor,
+		}, nil
+	}
 }
 
 // MockTokenServiceServer implements TokenServiceServer with hook functions.

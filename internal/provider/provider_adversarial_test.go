@@ -17,11 +17,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 )
 
 func init() {
-	grpcapi.RequireTransportSecurity = false
+	client.RequireTransportSecurity = false
 }
 
 func makeProviderConfig(ctx context.Context, p provider.Provider, values map[string]interface{}) tfsdk.Config {
@@ -152,6 +151,13 @@ func TestProvider_SchemaValidation_ConflictsWith(t *testing.T) {
 // TestProvider_Configure_MissingCredentials verifies that Configure returns an actionable
 // error diagnostic when no credentials are provided.
 func TestProvider_Configure_MissingCredentials(t *testing.T) {
+	if _, err := os.Stat("/var/run/nsc/token.json"); err == nil {
+		t.Skip("skipping missing-credentials check when host workload credential /var/run/nsc/token.json exists")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NSC_METADATA_DIR", t.TempDir())
+	t.Setenv("ProgramData", t.TempDir())
 	t.Setenv("NSC_TOKEN", "")
 	t.Setenv("NSC_TOKEN_FILE", "")
 

@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bsuv/terraform-provider-namespace/internal/client"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func createTestJWT(claims map[string]interface{}) string {
@@ -425,6 +430,299 @@ func TestVerifyTenantTokenMatch(t *testing.T) {
 		err := client.VerifyTenantTokenMatch("opaque-mock-token", expected)
 		if err == nil || !strings.Contains(err.Error(), "unsupported or opaque token format") {
 			t.Fatalf("expected opaque token error, got: %v", err)
+		}
+	})
+}
+
+func TestExtractClaims(t *testing.T) {
+	t.Run("Valid st_, nsct_, nscw_ JWTs with integer and fractional exp", func(t *testing.T) {
+		expSec := int64(1893456000)
+		for _, prefix := range []string{"st_", "nsct_", "nscw_"} {
+			jwt := createTestJWT(map[string]interface{}{
+				"exp":             expSec,
+				"tenant_id":       "tenant-123",
+				"actor_id":        "actor-456",
+				"instance_id":     "inst-789",
+				"owner_id":        "owner-abc",
+				"primary_region":  "eu",
+				"workload_region": "us",
+			})
+			claims, err := client.ExtractClaims(prefix + jwt)
+			if err != nil {
+				t.Fatalf("ExtractClaims(%s...) failed: %v", prefix, err)
+			}
+			if claims.ExpiresAt == nil || claims.ExpiresAt.Unix() != expSec {
+				t.Fatalf("expected ExpiresAt unix=%d, got %v", expSec, claims.ExpiresAt)
+			}
+			if claims.TenantID != "tenant-123" || claims.ActorID != "actor-456" || claims.InstanceID != "inst-789" ||
+				claims.OwnerID != "owner-abc" || claims.PrimaryRegion != "eu" || claims.WorkloadRegion != "us" {
+				t.Fatalf("unexpected claims parsed: %+v", claims)
+			}
+		}
+
+		// Fractional exp numeric date
+		fracJWT := createTestJWT(map[string]interface{}{
+			"exp":       1893456000.5,
+			"tenant_id": "frac-tenant",
+		})
+		claims, err := client.ExtractClaims("nsct_" + fracJWT)
+		if err != nil {
+			t.Fatalf("ExtractClaims fractional exp failed: %v", err)
+		}
+		if claims.ExpiresAt == nil || claims.ExpiresAt.Unix() != 1893456000 || claims.ExpiresAt.Nanosecond() == 0 {
+			t.Fatalf("expected fractional ExpiresAt, got %v", claims.ExpiresAt)
+		}
+	})
+
+	t.Run("Missing exp and null exp yield nil ExpiresAt", func(t *testing.T) {
+		noExp := "nsct_" + createTestJWT(map[string]interface{}{"tenant_id": "t1"})
+		claims, err := client.ExtractClaims(noExp)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if claims.ExpiresAt != nil {
+			t.Fatalf("expected nil ExpiresAt when missing, got %v", claims.ExpiresAt)
+		}
+
+		nullExp := "nsct_" + createTestJWT(map[string]interface{}{"tenant_id": "t1", "exp": nil})
+		claims, err = client.ExtractClaims(nullExp)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if claims.ExpiresAt != nil {
+			t.Fatalf("expected nil ExpiresAt when null, got %v", claims.ExpiresAt)
+		}
+	})
+
+	t.Run("Unsupported prefixes and empty string return ErrNotLoggedIn", func(t *testing.T) {
+		bareJWT := createTestJWT(map[string]interface{}{"tenant_id": "t1"})
+		unsupported := []string{
+			"",
+			bareJWT,
+			"nsrt_" + bareJWT,
+			"nscu_" + bareJWT,
+			"tok_" + bareJWT,
+		}
+		for _, tok := range unsupported {
+			_, err := client.ExtractClaims(tok)
+			if !errors.Is(err, client.ErrNotLoggedIn) {
+				t.Fatalf("expected ErrNotLoggedIn for %q, got %v", tok, err)
+			}
+		}
+	})
+
+	t.Run("Malformed tokens return ErrNotLoggedIn", func(t *testing.T) {
+		validHdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+		validPay := base64.RawURLEncoding.EncodeToString([]byte(`{"tenant_id":"t"}`))
+		badHeader := "!!!" + "." + validPay + ".sig"
+		nonJSONHeader := base64.RawURLEncoding.EncodeToString([]byte("not-json")) + "." + validPay + ".sig"
+		nullHeader := base64.RawURLEncoding.EncodeToString([]byte("null")) + "." + validPay + ".sig"
+		badPayload := validHdr + ".!!!.sig"
+		nonJSONPayload := validHdr + "." + base64.RawURLEncoding.EncodeToString([]byte("not-json")) + ".sig"
+		nullPayload := validHdr + "." + base64.RawURLEncoding.EncodeToString([]byte("null")) + ".sig"
+		arrayPayload := validHdr + "." + base64.RawURLEncoding.EncodeToString([]byte("[]")) + ".sig"
+		emptySig := validHdr + "." + validPay + "."
+		internalSpace := " " + validHdr + " . " + validPay + " . sig"
+		nonNumericExp := createTestJWT(map[string]interface{}{"exp": "not-a-number", "tenant_id": "t"})
+		quotedNumericExp := createTestJWT(map[string]interface{}{"exp": "1893456000", "tenant_id": "t"})
+		overflowFloatExp := validHdr + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":1e20,"tenant_id":"t"}`)) + ".sig"
+		underflowFloatExp := validHdr + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":-1e20,"tenant_id":"t"}`)) + ".sig"
+		overflowIntExp := validHdr + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":9223372036854775808,"tenant_id":"t"}`)) + ".sig"
+
+		malformed := []string{
+			"st_",
+			"st_not-a-jwt",
+			"nsct_a.b",
+			"nsct_" + badHeader,
+			"nsct_" + nonJSONHeader,
+			"nsct_" + nullHeader,
+			"nsct_" + badPayload,
+			"nsct_" + nonJSONPayload,
+			"nsct_" + nullPayload,
+			"nsct_" + arrayPayload,
+			"nsct_" + emptySig,
+			"nsct_" + internalSpace,
+			"nsct_" + nonNumericExp,
+			"nsct_" + quotedNumericExp,
+			"nsct_" + overflowFloatExp,
+			"nsct_" + underflowFloatExp,
+			"nsct_" + overflowIntExp,
+		}
+		for _, tok := range malformed {
+			_, err := client.ExtractClaims(tok)
+			if !errors.Is(err, client.ErrNotLoggedIn) {
+				t.Fatalf("expected ErrNotLoggedIn for malformed %q, got %v", tok, err)
+			}
+		}
+	})
+
+	t.Run("Int64 boundary exp values succeed cleanly", func(t *testing.T) {
+		for _, expVal := range []int64{math.MaxInt64, math.MinInt64} {
+			tok := "nsct_" + createTestJWT(map[string]interface{}{"exp": expVal, "tenant_id": "t"})
+			claims, err := client.ExtractClaims(tok)
+			if err != nil {
+				t.Fatalf("ExtractClaims(exp=%d) failed: %v", expVal, err)
+			}
+			if claims.ExpiresAt == nil || claims.ExpiresAt.Unix() != expVal {
+				t.Fatalf("expected ExpiresAt=%d, got %v", expVal, claims.ExpiresAt)
+			}
+		}
+	})
+
+	t.Run("Control characters, non-ASCII spaces, and invalid signature segments return ErrNotLoggedIn", func(t *testing.T) {
+		hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+		pay := base64.RawURLEncoding.EncodeToString([]byte(`{"tenant_id":"t"}`))
+		badTokens := []string{
+			"nsct_" + hdr + "\v." + pay + ".sig",
+			"nsct_" + hdr + "." + pay + ".sig\v",
+			"nsct_" + hdr + "\f." + pay + ".sig",
+			"nsct_" + hdr + "\u00a0." + pay + ".sig",
+			"nsct_" + hdr + "\x00." + pay + ".sig",
+			"nsct_" + hdr + "\x7f." + pay + ".sig",
+			"nsct_" + hdr + "." + pay + ".bad sig!",
+			"nsct_" + hdr + "." + pay + ".bad/sig+",
+			"nsct_" + hdr + "." + pay + ".==",
+		}
+		for _, bad := range badTokens {
+			if _, err := client.ExtractClaims(bad); !errors.Is(err, client.ErrNotLoggedIn) {
+				t.Fatalf("expected ErrNotLoggedIn for %q, got %v", bad, err)
+			}
+		}
+
+		// Padded base64url segments remain accepted when valid
+		paddedHdr := base64.URLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+		paddedPay := base64.URLEncoding.EncodeToString([]byte(`{"tenant_id":"padded-t"}`))
+		paddedSig := base64.URLEncoding.EncodeToString([]byte("sig!"))
+		claims, err := client.ExtractClaims("nsct_" + paddedHdr + "." + paddedPay + "." + paddedSig)
+		if err != nil || claims.TenantID != "padded-t" {
+			t.Fatalf("expected padded valid JWT to succeed, got claims=%+v err=%v", claims, err)
+		}
+	})
+}
+
+func TestResolveTokenSource_SessionTokenExchange(t *testing.T) {
+	origRTS := client.RequireTransportSecurity
+	client.RequireTransportSecurity = false
+	t.Cleanup(func() {
+		client.RequireTransportSecurity = origRTS
+	})
+
+	ctx := context.Background()
+
+	t.Run("Raw st_ token file is validated and exchanged via UserSessionsService", func(t *testing.T) {
+		mockIAM := startMockIAMServer(t, "raw-st-file")
+		tmpDir := t.TempDir()
+		rawSTFile := filepath.Join(tmpDir, "session.tok")
+		sessionTok := "st_" + "raw_file_session_token_123456"
+		if err := os.WriteFile(rawSTFile, []byte(sessionTok+"\n"), 0600); err != nil {
+			t.Fatalf("failed to write raw st_ file: %v", err)
+		}
+
+		ts, err := client.ResolveTokenSource(ctx, client.AuthConfig{
+			TokenFile:   rawSTFile,
+			IAMEndpoint: mockIAM.Endpoint(),
+			Creds:       insecure.NewCredentials(),
+			DialOptions: []grpc.DialOption{mockIAM.DialOption()},
+		})
+		if err != nil {
+			t.Fatalf("expected raw st_ token file to pass validation, got: %v", err)
+		}
+		if closer, ok := ts.(interface{ Close() error }); ok {
+			t.Cleanup(func() { _ = closer.Close() })
+		}
+
+		tok, err := ts.IssueToken(ctx, time.Minute, false)
+		if err != nil {
+			t.Fatalf("expected raw st_ IssueToken exchange to succeed, got: %v", err)
+		}
+		if !strings.HasPrefix(tok, "nsct_") {
+			t.Fatalf("expected exchanged nsct_ tenant token, got %q", tok)
+		}
+		if mockIAM.requestCt.Load() != 1 {
+			t.Fatalf("expected 1 IAM exchange request, got %d", mockIAM.requestCt.Load())
+		}
+	})
+
+	t.Run("Invalid st_ literal and malformed JSON still fail validation", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		bareST := filepath.Join(tmpDir, "bare_st.tok")
+		_ = os.WriteFile(bareST, []byte("st_"), 0600)
+		if _, err := client.ResolveTokenSource(ctx, client.AuthConfig{TokenFile: bareST}); err == nil || !strings.Contains(err.Error(), "contains malformed JSON") {
+			t.Fatalf("expected bare st_ file to fail with malformed JSON error, got: %v", err)
+		}
+
+		spacedST := filepath.Join(tmpDir, "spaced_st.tok")
+		_ = os.WriteFile(spacedST, []byte("st_foo bar"), 0600)
+		if _, err := client.ResolveTokenSource(ctx, client.AuthConfig{TokenFile: spacedST}); err == nil || !strings.Contains(err.Error(), "contains malformed JSON") {
+			t.Fatalf("expected spaced st_ file to fail with malformed JSON error, got: %v", err)
+		}
+	})
+
+	t.Run("Inline st_ via cfg.Token wraps in SessionTokenSource and exchanges", func(t *testing.T) {
+		mockIAM := startMockIAMServer(t, "inline-cfg-st")
+		sessionTok := "st_" + "inline_cfg_session_token_123456"
+
+		ts, err := client.ResolveTokenSource(ctx, client.AuthConfig{
+			Token:       sessionTok,
+			IAMEndpoint: mockIAM.Endpoint(),
+			Creds:       insecure.NewCredentials(),
+			DialOptions: []grpc.DialOption{mockIAM.DialOption()},
+		})
+		if err != nil {
+			t.Fatalf("unexpected ResolveTokenSource error: %v", err)
+		}
+		sts, ok := ts.(*client.SessionTokenSource)
+		if !ok {
+			t.Fatalf("expected *client.SessionTokenSource for inline st_ cfg.Token, got %T", ts)
+		}
+		t.Cleanup(func() { _ = sts.Close() })
+
+		tok, err := ts.IssueToken(ctx, time.Minute, false)
+		if err != nil {
+			t.Fatalf("expected inline st_ exchange to succeed, got: %v", err)
+		}
+		if !strings.HasPrefix(tok, "nsct_") || mockIAM.requestCt.Load() != 1 {
+			t.Fatalf("expected exchanged nsct_ token with 1 IAM call, got tok=%q calls=%d", tok, mockIAM.requestCt.Load())
+		}
+	})
+
+	t.Run("Inline st_ via NSC_TOKEN wraps in SessionTokenSource and exchanges", func(t *testing.T) {
+		mockIAM := startMockIAMServer(t, "inline-env-st")
+		sessionTok := "st_" + "inline_env_session_token_123456"
+		t.Setenv("NSC_TOKEN", sessionTok)
+
+		ts, err := client.ResolveTokenSource(ctx, client.AuthConfig{
+			IAMEndpoint: mockIAM.Endpoint(),
+			Creds:       insecure.NewCredentials(),
+			DialOptions: []grpc.DialOption{mockIAM.DialOption()},
+		})
+		if err != nil {
+			t.Fatalf("unexpected ResolveTokenSource error: %v", err)
+		}
+		sts, ok := ts.(*client.SessionTokenSource)
+		if !ok {
+			t.Fatalf("expected *client.SessionTokenSource for inline st_ NSC_TOKEN, got %T", ts)
+		}
+		t.Cleanup(func() { _ = sts.Close() })
+
+		tok, err := ts.IssueToken(ctx, time.Minute, false)
+		if err != nil {
+			t.Fatalf("expected env inline st_ exchange to succeed, got: %v", err)
+		}
+		if !strings.HasPrefix(tok, "nsct_") || mockIAM.requestCt.Load() != 1 {
+			t.Fatalf("expected exchanged nsct_ token with 1 IAM call, got tok=%q calls=%d", tok, mockIAM.requestCt.Load())
+		}
+	})
+
+	t.Run("Inline nsct_ and nsrt_ remain StaticTokenSource", func(t *testing.T) {
+		for _, tok := range []string{"nsct_" + "static_bearer_123456", "nsrt_" + "static_revokable_123456"} {
+			ts, err := client.ResolveTokenSource(ctx, client.AuthConfig{Token: tok})
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tok, err)
+			}
+			if _, ok := ts.(client.StaticTokenSource); !ok {
+				t.Fatalf("expected StaticTokenSource for %q, got %T", tok, ts)
+			}
 		}
 	})
 }

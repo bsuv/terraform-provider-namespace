@@ -1,9 +1,9 @@
 # Namespace Cloud gRPC API Surface Catalog & Terraform Object Inventory
 
-- **Specification Revision:** 2026-08-21
-- **Protobuf Package Base:** `buf.build/gen/go/namespace/cloud/protocolbuffers/go@v1.36.12-20260820164744-a1973bcf4d87.1`
-- **gRPC Stubs Package Base:** `buf.build/gen/go/namespace/cloud/grpc/go@v1.6.2-20260820164744-a1973bcf4d87.1`
-- **Integrations SDK:** `namespacelabs.dev/integrations@v0.0.10`
+- **Specification Revision:** 2026-11-06
+- **Protobuf Package Base:** `buf.build/gen/go/namespace/cloud/protocolbuffers/go@v1.36.12-20261106090801-6db93b78d1d9.2`
+- **gRPC Stubs Package Base:** `buf.build/gen/go/namespace/cloud/grpc/go@v1.6.2-20261106090801-6db93b78d1d9.1`
+- **Client Auth & Transport:** In-tree `internal/client` (Go stdlib + `google.golang.org/grpc`)
 - **Terraform Plugin Framework:** `v1.19.0`
 - **Go Baseline:** `1.26.11`
 
@@ -20,32 +20,35 @@
   - Update: `UpdateProfile(UpdateProfileRequest) returns (UpdateProfileResponse)`
   - Delete: `DeleteProfile(DeleteProfileRequest) returns (Empty)`
 - **Endpoint Class:** Global (`https://global.namespaceapis.com:443`)
-- **Credential Class:** Tenant Bearer Token (`nsct_...`)
-- **Minimum Permissions:** `{"github/profile", "manage"}`
+- **Credential Class:** Tenant Bearer Token (`nsct_...`, `nsrt_...`)
+- **Minimum Permissions:** `{"github/runner-profile", "manage"}`
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|
   | `id` | String | Computed | `UseStateForUnknown()`, maps server `profile_id` |
   | `profile_id` | String | Computed | `UseStateForUnknown()`, server stable ID |
-  | `version` | Int64 | Computed | `UseStateForUnknown()`, tracks `update_version` |
+  | `version` | Int64 | Computed | Tracks `update_version` |
   | `created_at` | String | Computed | `UseStateForUnknown()`, RFC3339 timestamp |
-  | `updated_at` | String | Computed | `UseStateForUnknown()`, RFC3339 timestamp |
+  | `updated_at` | String | Computed | RFC3339 timestamp |
   | `tag` | String | Required | Non-empty string; unique within workspace |
   | `os` | String | Required | Base image label (e.g. `ubuntu-24.04`, `macos-15`) |
   | `description` | String | Optional, Computed | UTF-8 description string |
   | `emoji` | String | Optional, Computed | Display icon string |
   | `swap_size_mb` | Int64 | Optional, Computed | `AtLeast(0)`, `Between(0, math.MaxInt32)` |
   | `builder_mode` | String | Optional, Computed | `OneOf("BUILDER_MODE_UNSPECIFIED", "USE_REMOTE_BUILDER", "USE_LOCAL_CACHE", "NO_CACHING")` |
-  | `access_level` | String | Optional, Computed | `OneOf("ACCESS_LEVEL_UNSPECIFIED", "ACCESS_LEVEL_PERMISSIVE", "ACCESS_LEVEL_LIMITED", "ACCESS_LEVEL_RESTRICTED")` |
+  | `access_level` | String | Optional, Computed | `OneOf("ACCESS_LEVEL_UNSPECIFIED", "ACCESS_LEVEL_PERMISSIVE", "ACCESS_LEVEL_LIMITED", "ACCESS_LEVEL_RESTRICTED", "ACCESS_LEVEL_CUSTOM")` |
+  | `custom_permissions` | List Nested | Optional | Granular IAM permissions (`iamv1beta.Permission`) |
+  | `custom_permissions.*.resource_type` | String | Required | `NonEmptyString()` (e.g. `vault/object`, `cache/bazel`) |
+  | `custom_permissions.*.resource_id` | String | Required | Resource identifier scope (empty string or specific resource ID) |
+  | `custom_permissions.*.actions` | List(String) | Required | Allowed action verbs for `resource_type` |
   | `experimental_features` | List(String) | Optional, Computed | Preserved in configuration order |
   | `instance_shape` | Single Nested | Optional, Computed | Compute sizing block |
   | `instance_shape.virtual_cpu` | Int64 | Optional, Computed | `Between(1, math.MaxInt32)` |
   | `instance_shape.memory_megabytes` | Int64 | Optional, Computed | `Between(1, math.MaxInt32)` |
   | `instance_shape.machine_arch` | String | Optional, Computed | `OneOf("amd64", "arm64", "")` |
-  | `instance_shape.os` | String | Optional, Computed | `OneOf("linux", "macos", "")` |
+  | `instance_shape.os` | String | Optional, Computed | `OneOf("linux", "macos", "windows", "")` |
   | `instance_shape.selectors` | List Nested | Optional, Computed | Labels preserved in configuration order |
-  | `cache_volume_settings` | List Nested | Optional, Computed | Cache volume attachments preserved in configuration order |
-  | `cache_volume_settings.*.volume_tag` | String | Required | Unique non-empty tag |
+  | `cache_volume_settings` | List Nested | Optional, Computed | Cache volume attachments preserved positionally in configuration order |
   | `cache_volume_settings.*.volume_size_gb` | Int64 | Required | `Between(1, math.MaxInt32)` |
   | `cache_volume_settings.*.volume_reserved_size_gb` | Int64 | Optional, Computed | `Between(0, math.MaxInt32)`, must be `< volume_size_gb` |
   | `cache_volume_settings.*.bundled_container_cache` | Bool | Optional, Computed | Boolean flag |
@@ -63,6 +66,7 @@
   | `network_policy.advisory` | Bool | Optional, Computed | Advisory flag; only valid with `EGRESS_POLICY_DOMAIN_ALLOW_LIST` |
   | `network_policy.egress_policy_tag` | String | Optional, Computed | Policy tag; only valid with `EGRESS_POLICY_TAG` |
   | `custom_runner_images` | List Nested | Computed | Flattened status list sorted by `image_ref` |
+- **Schema Version:** `1` (`UpgradeState` v0 -> v1 state migration supported)
 - **Stable Identity:** `profile_id`.
 - **Custom-image product contract:** Omitting `custom_runner_image_spec` models neither customization; a present block requires at least one child and permits Ubuntu-only, Docker-only, or both because the pinned generated fields are independent. `TestAccRunnerProfile_CustomImageCombinations` exercises all four cases against the live service, and the release report fails closed if that protected test is absent, skipped, or rejected.
 - **Import Support:** Supported by `profile_id` or unique single-match `tag` (state is rewritten to stable `profile_id`).
@@ -88,9 +92,9 @@
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|
-  | `id` | String | Computed | Matches `name` |
+  | `id` | String | Computed | `UseStateForUnknown()`, matches `name` |
   | `name` | String | Required | `RequiresReplace()`, unique partner-scoped group identifier |
-  | `policies` | List Nested | Optional | Key-value policy configuration; preserved in configuration/server order |
+  | `policies` | List Nested | Optional, Computed | Key-value policy configuration; preserved in configuration/server order |
   | `policies.*.policy` | String | Required | Policy identifier string |
   | `policies.*.value` | String | Required | JSON/protobuf serialized policy value |
   | `enrolled_tenant_ids` | List(String) | Computed | Sorted deterministically |
@@ -111,6 +115,7 @@
   - Delete: `UnshareImage(UnshareImageRequest) returns (Empty)`
 - **Endpoint Class:** Global (`https://global.namespaceapis.com:443`)
 - **Credential Class:** Tenant Bearer Token
+- **Minimum Permissions:** `{"containerregistry/repository", "share"}` (Create/Delete: `ShareImage`/`UnshareImage`), `{"containerregistry/repository", "list"}` (Read: `ListSharedImages`)
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|
@@ -118,8 +123,8 @@
   | `repository` | String | Required | `RequiresReplace()`, source image repository |
   | `digest` | String | Required | `RequiresReplace()`, sha256 image digest |
   | `visibility` | String | Required | `RequiresReplace()`, `OneOf("PUBLIC", "PARTNER")` |
-  | `expires_at` | String | Optional | `RequiresReplace()`, `ValidRFC3339()` |
-  | `suffix` | String | Optional | `RequiresReplace()`, access ref suffix |
+  | `expires_at` | String | Optional, Computed | `RequiresReplace()`, `ValidRFC3339()` |
+  | `suffix` | String | Optional, Computed | `RequiresReplace()`, access ref suffix |
   | `image_ref` | String | Computed | Public access URL (e.g. `public.nscr.io/{id}/{suffix}`) |
   | `shared_repository` | String | Computed | Returned shared repository |
   | `shared_digest` | String | Computed | Returned shared digest |
@@ -139,11 +144,12 @@
   - Create/Update: `UpdateDefaultPolicy(UpdateDefaultPolicyRequest) returns (Empty)`
 - **Endpoint Class:** Global
 - **Credential Class:** Tenant Bearer Token
+- **Minimum Permissions:** `{"containerregistry/repository", "configure"}` (Mutating: `UpdateDefaultPolicy`), `{"containerregistry/repository", "list"}` (Read: `GetDefaultPolicy`)
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|
-  | `id` | String | Computed | Fixed singleton ID `"default"` |
-  | `revision` | Int64 | Computed | `UseStateForUnknown()`, optimistic concurrency revision |
+  | `id` | String | Computed | `UseStateForUnknown()`, fixed singleton ID `"default"` |
+  | `revision` | Int64 | Computed | Optimistic concurrency revision |
   | `default_expiration` | String | Optional, Computed | Duration string, `DurationAtLeast(4h)` |
   | `expiration_enforcement` | String | Required | `OneOf("EXPIRATION_ENFORCEMENT_ENFORCE", "EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE")` |
 - **Cross-Field Validation:** When `expiration_enforcement == "EXPIRATION_ENFORCEMENT_ENFORCE"`, `default_expiration` is required and must be >= 4h.
@@ -161,16 +167,17 @@
   - Create/Update: `UpdateRepositoryPolicy(UpdateRepositoryPolicyRequest) returns (Empty)`
 - **Endpoint Class:** Global
 - **Credential Class:** Tenant Bearer Token
+- **Minimum Permissions:** `{"containerregistry/repository", "configure"}` (Mutating: `UpdateRepositoryPolicy`), `{"containerregistry/repository", "list"}` (Read: `GetRepositoryPolicy`)
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|
-  | `id` | String | Computed | Matches `repository` |
+  | `id` | String | Computed | `UseStateForUnknown()`, matches `repository` |
   | `repository` | String | Required | `RequiresReplace()`, repository name |
-  | `revision` | Int64 | Computed | `UseStateForUnknown()`, optimistic concurrency revision |
+  | `revision` | Int64 | Computed | Optimistic concurrency revision |
   | `expiration` | String | Optional, Computed | Duration string, `DurationAtLeast(4h)` |
   | `expiration_enforcement` | String | Required | `OneOf("EXPIRATION_ENFORCEMENT_ENFORCE", "EXPIRATION_ENFORCEMENT_DO_NOT_ENFORCE")` |
 - **Cross-Field Validation:** When `expiration_enforcement == "EXPIRATION_ENFORCEMENT_ENFORCE"`, `expiration` is required and must be >= 4h.
-- **Destroy Semantics:** Resets repository override (`expiration = nil`, `expiration_enforcement = UNKNOWN`), reverting repository to default policy, and reads back to verify reset before removing state.
+- **Destroy Semantics:** Resets repository override (`expiration = nil`, `expiration_enforcement = EXPIRATION_ENFORCEMENT_UNKNOWN`), reverting repository to default policy, and reads back to verify reset before removing state.
 - **Import Support:** `terraform import namespace_registry_repository_policy.name <repository>`.
 - **Deadline / Retry Class:** Read: 30s, at most 4 attempts. Mutating: 60s, 1 attempt (fail-fast).
 
@@ -253,7 +260,7 @@
 - **gRPC Service:** `namespace.cloud.integrations.bazel.v1beta.BazelCacheService` (`bazelv1betagrpc.BazelCacheServiceClient`)
 - **RPC Method:** `EnsureBazelCache(EnsureBazelCacheRequest) returns (EnsureBazelCacheResponse)`
 - **Endpoint Class:** Global (`https://global.namespaceapis.com:443`)
-- **Credential Class:** Tenant Bearer Token (`{"integrations/bazel", "ensure"}`)
+- **Credential Class:** Tenant Bearer Token (`{"cache/bazel", "ensure"}`)
 - **Lifecycle / Contract:** `Open` only. Note: Opening invokes an `EnsureBazelCache` RPC that may create or reuse durable server-side cache infrastructure. Terraform does not manage cache persistence or deletion.
 - **Deadline / Retry Class:** Mutating: 60s deadline, 1 attempt (fail-fast).
 - **Schema Attributes:**
@@ -284,7 +291,7 @@
 - **gRPC Service:** `namespace.cloud.integrations.gradle.v1beta.GradleCacheService` (`gradlev1betagrpc.GradleCacheServiceClient`)
 - **RPC Method:** `EnsureGradleCache(EnsureGradleCacheRequest) returns (EnsureGradleCacheResponse)`
 - **Endpoint Class:** Global (`https://global.namespaceapis.com:443`)
-- **Credential Class:** Tenant Bearer Token (`{"integrations/gradle", "ensure"}`)
+- **Credential Class:** Tenant Bearer Token (`{"cache/gradle", "ensure"}`)
 - **Lifecycle / Contract:** `Open` only. Note: Opening invokes an `EnsureGradleCache` RPC that may create or reuse durable server-side cache infrastructure.
 - **Deadline / Retry Class:** Mutating: 60s deadline, 1 attempt (fail-fast).
 - **Schema Attributes:**
@@ -304,7 +311,7 @@
 - **gRPC Service:** `namespace.cloud.integrations.httpcache.v1beta.HttpCacheService` (`httpcachev1betagrpc.HttpCacheServiceClient`)
 - **RPC Method:** `EnsureHttpCache(EnsureHttpCacheRequest) returns (EnsureHttpCacheResponse)`
 - **Endpoint Class:** Global (`https://global.namespaceapis.com:443`)
-- **Credential Class:** Tenant Bearer Token (`{"integrations/httpcache", "ensure"}`)
+- **Credential Class:** Tenant Bearer Token (`{"cache/httpcache", "ensure"}`)
 - **Lifecycle / Contract:** `Open` only. Note: Opening invokes an `EnsureHttpCache` RPC that may create or reuse durable server-side cache infrastructure.
 - **Deadline / Retry Class:** Mutating: 60s deadline, 1 attempt (fail-fast).
 - **Schema Attributes:**
@@ -326,7 +333,7 @@
 - **gRPC Service:** `namespace.cloud.github.v1beta.ProfileService` (`githubv1betagrpc.ProfileServiceClient`)
 - **RPC Method:** `ListProfiles(Empty) returns (ListProfilesResponse)`
 - **Endpoint Class:** Global (`https://global.namespaceapis.com:443`)
-- **Credential Class:** Tenant Bearer Token (`{"github/profile", "read"}`)
+- **Credential Class:** Tenant Bearer Token (`{"github/runner-profile", "read"}`)
 - **Lookup Semantics:** Exactly one of `profile_id` or `tag` must be specified. Returns error diagnostic if zero or multiple matches found.
 - **Deadline / Retry Class:** Read: 30s deadline, at most 4 attempts with exponential backoff.
 - **Schema Attributes:**
@@ -343,13 +350,17 @@
   | `emoji` | String | Computed | Profile emoji |
   | `swap_size_mb` | Int64 | Computed | Swap size in megabytes |
   | `builder_mode` | String | Computed | Builder caching mode |
-  | `access_level` | String | Computed | Workload access level |
+  | `access_level` | String | Computed | Workload access level (including `ACCESS_LEVEL_CUSTOM`) |
+  | `custom_permissions` | List Nested | Computed | Granular IAM permissions (`iamv1beta.Permission`) |
+  | `custom_permissions.*.resource_type` | String | Computed | Resource type identifier |
+  | `custom_permissions.*.resource_id` | String | Computed | Resource identifier scope |
+  | `custom_permissions.*.actions` | List(String) | Computed | Allowed action verbs |
   | `experimental_features` | List(String) | Computed | Experimental feature flags |
   | `instance_shape` | Single Nested | Computed | Instance compute sizing |
   | `instance_shape.virtual_cpu` | Int64 | Computed | Virtual CPU count |
   | `instance_shape.memory_megabytes` | Int64 | Computed | Memory in megabytes |
   | `instance_shape.machine_arch` | String | Computed | Machine architecture (`amd64`, `arm64`) |
-  | `instance_shape.os` | String | Computed | OS family (`linux`, `macos`) |
+  | `instance_shape.os` | String | Computed | OS family (`linux`, `macos`, `windows`) |
   | `instance_shape.selectors` | List Nested | Computed | Node selectors |
   | `cache_volume_settings` | List Nested | Computed | Attached cache volume configurations |
   | `custom_runner_image_spec` | Single Nested | Computed | Custom runner container image spec |
@@ -363,13 +374,13 @@
 - **gRPC Service:** `namespace.cloud.github.v1beta.ProfileService`
 - **RPC Method:** `ListProfiles(Empty) returns (ListProfilesResponse)`
 - **Endpoint Class:** Global
-- **Credential Class:** Tenant Bearer Token
+- **Credential Class:** Tenant Bearer Token (`{"github/runner-profile", "read"}`)
 - **Ordering:** Deterministically sorted by `profile_id`.
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|
   | `id` | String | Computed | Fixed constant identifier |
-  | `profiles` | List Nested | Computed | List of runner profiles in workspace sorted by `profile_id` |
+  | `profiles` | List Nested | Computed | List of runner profiles in workspace sorted by `profile_id` (includes `access_level` with `ACCESS_LEVEL_CUSTOM`, `custom_permissions`, `instance_shape.os` supporting `linux`/`macos`/`windows`) |
 
 ---
 
@@ -393,11 +404,13 @@
   | `images.*.title` | String | Computed | Human-readable title |
   | `images.*.spec` | Single Nested | Computed | Base image detailed specification |
   | `images.*.spec.id` | String | Computed | Base image unique ID |
-  | `images.*.spec.os` | String | Computed | OS family (`linux`, `macos`) |
+  | `images.*.spec.os` | String | Computed | OS family (`linux`, `macos`, `windows`) |
   | `images.*.spec.os_name` | String | Computed | Human-friendly OS name |
-  | `images.*.spec.arch` | String | Computed | Architecture (`amd64`, `arm64`) |
-  | `images.*.spec.packages` | List Nested | Computed | Pre-installed package metadata sorted by `name`, `version`, `build`, `type` |
-  | `images.*.spec.is_default` | Bool | Computed | Default image flag |
+  | `images.*.spec.os_version` | String | Computed | OS version string |
+  | `images.*.spec.os_build` | String | Computed | OS build identifier |
+  | `images.*.spec.description` | String | Computed | Base image description |
+  | `images.*.spec.release_stage` | String | Computed | Release stage |
+  | `images.*.spec.packages` | List Nested | Computed | Pre-installed package metadata (`name`, `type`, `version`, `build`, `is_default`) sorted by `name`, `version`, `build`, `type` |
 
 ---
 
@@ -428,7 +441,7 @@
 - **gRPC Service:** `namespace.cloud.iam.v1beta.TenantMembershipService` (`iamv1betagrpc.TenantMembershipServiceClient`)
 - **RPC Method:** `ListTenantMembers(Empty) returns (ListTenantMembersResponse)`
 - **Endpoint Class:** IAM
-- **Credential Class:** Tenant Bearer Token (`{"iam/member", "read"}`)
+- **Credential Class:** Tenant Bearer Token (`{"tenant/member", "list"}`)
 - **Ordering:** Sorted deterministically by `user_id`.
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
@@ -448,7 +461,7 @@
 - **gRPC Service:** `namespace.cloud.vault.v1beta.VaultService` (`vaultv1betagrpc.VaultServiceClient`)
 - **RPC Method:** `ListObjects(ListObjectsRequest) returns (ListObjectsResponse)`
 - **Endpoint Class:** Global (`https://global.namespaceapis.com:443`)
-- **Credential Class:** Tenant Bearer Token (`{"vault", "read"}`)
+- **Credential Class:** Tenant Bearer Token (`{"vault/object", "read"}`)
 - **Security & Lifecycle:** Queries Vault metadata via `ListObjects` only; never calls value-revealing `DescribeObject`. Matches `object_id` client-side, filters out soft-deleted secrets (`deleted_at != nil`), and omits `updated_at`.
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
@@ -519,7 +532,7 @@
 - **gRPC Service:** `namespace.cloud.registry.v1beta.ContainerRegistryService` (`registryv1betagrpc.ContainerRegistryServiceClient`)
 - **RPC Method:** `GetImage(GetImageRequest) returns (GetImageResponse)`
 - **Endpoint Class:** Global (`https://global.namespaceapis.com:443`)
-- **Credential Class:** Tenant Bearer Token (`{"registry", "read"}`)
+- **Credential Class:** Tenant Bearer Token (`{"containerregistry/repository", "list"}`)
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|
@@ -529,7 +542,9 @@
   | `digest` | String | Computed | Authoritative sha256 content digest |
   | `created_at` | String | Computed | RFC3339 creation timestamp |
   | `expires_at` | String | Computed | RFC3339 expiration timestamp |
+  | `deleted_at` | String | Computed | RFC3339 deletion timestamp, if soft-deleted |
   | `size_bytes` | Int64 | Computed | Total image size in bytes |
+  | `labels` | Map(String) | Computed | Key-value labels attached to image |
   | `tags` | List(String) | Computed | Sorted list of tags pointing to this digest |
 
 ---
@@ -539,29 +554,35 @@
 - **gRPC Service:** `namespace.cloud.registry.v1beta.ContainerRegistryService`
 - **RPC Method:** `ListImages(ListImagesRequest) returns (ListImagesResponse)`
 - **Endpoint Class:** Global
-- **Credential Class:** Tenant Bearer Token
-- **Pagination & Ordering:** Follows server pagination tokens; returns images deterministically sorted.
+- **Credential Class:** Tenant Bearer Token (`{"containerregistry/repository", "list"}`)
+- **Pagination & Ordering:** Follows server pagination tokens forwarding `deletion_filter` and `expires_at` identically on every `ListImages` page; returns images deterministically sorted by `created_at` ascending then `digest` ascending (Paginated Read: 2m overall, 15s/page, max 4 attempts/page).
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|
   | `id` | String | Computed | Matches `repository` |
   | `repository` | String | Required | Container registry repository name |
+  | `deletion_filter` | String | Optional | `OneOf("DELETION_FILTER_UNSPECIFIED", "INCLUDE_DELETED", "EXCLUDE_DELETED")`, unset by default (`DELETION_FILTER_UNSPECIFIED`) |
+  | `expires_at` | Single Nested | Optional | Exclusive RFC3339 expiration timestamp range filter |
+  | `expires_at.after` | String | Optional | `ValidRFC3339()`, must be earlier than `expires_at.before` |
+  | `expires_at.before` | String | Optional | `ValidRFC3339()`, must be later than `expires_at.after` |
   | `images` | List Nested | Computed | List of images in repository |
   | `images.*.repository` | String | Computed | Repository name |
   | `images.*.digest` | String | Computed | Image sha256 digest |
   | `images.*.created_at` | String | Computed | RFC3339 creation timestamp |
   | `images.*.expires_at` | String | Computed | RFC3339 expiration timestamp |
+  | `images.*.deleted_at` | String | Computed | RFC3339 deletion timestamp, if soft-deleted |
   | `images.*.size_bytes` | Int64 | Computed | Total image size in bytes |
+  | `images.*.labels` | Map(String) | Computed | Key-value labels attached to image |
   | `images.*.tags` | List(String) | Computed | Sorted list of tags pointing to digest |
 
 ---
 
 ### 3.11 `data "namespace_builder_configuration"`
 - **Milestone:** Phase 4
-- **gRPC Service:** `namespace.cloud.compute.v1beta.BuilderService` (`builderv1betagrpc.BuilderServiceClient`)
+- **gRPC Service:** `namespace.cloud.builder.v1beta.BuilderService` (`builderv1betagrpc.BuilderServiceClient`)
 - **RPC Method:** `GetBuilderConfiguration(GetBuilderConfigurationRequest) returns (GetBuilderConfigurationResponse)`
 - **Endpoint Class:** Regional Compute
-- **Credential Class:** Tenant Bearer Token (`{"compute/builder", "read"}`)
+- **Credential Class:** Tenant Bearer Token (`{"builder", "read"}`)
 - **Security Suppression:** Always sends `skip_builder_pre_spawn = true` and `return_new_credentials = false` to prevent accidental instance spawns and credential leakage.
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
@@ -577,16 +598,16 @@
   | `shape.virtual_cpu` | Int64 | Computed | Number of virtual CPUs |
   | `shape.memory_megabytes` | Int64 | Computed | RAM in megabytes |
   | `shape.machine_arch` | String | Computed | Architecture (`amd64`, `arm64`) |
-  | `shape.os` | String | Computed | OS family (`linux`, `macos`) |
+  | `shape.os` | String | Computed | OS family (`linux`, `macos`, `windows`) |
 
 ---
 
 ### 3.12 `data "namespace_builder_usage"`
 - **Milestone:** Phase 4
-- **gRPC Service:** `namespace.cloud.compute.v1beta.BuilderService`
+- **gRPC Service:** `namespace.cloud.builder.v1beta.BuilderService` (`builderv1betagrpc.BuilderServiceClient`)
 - **RPC Method:** `GetBuilderUsage(GetBuilderUsageRequest) returns (GetBuilderUsageResponse)`
 - **Endpoint Class:** Regional Compute
-- **Credential Class:** Tenant Bearer Token (`{"compute/builder", "read"}`)
+- **Credential Class:** Tenant Bearer Token (`{"builder", "read"}`)
 - **Schema Attributes:**
   | Attribute | Type | Nature | Modifiers / Validators |
   |---|---|---|---|

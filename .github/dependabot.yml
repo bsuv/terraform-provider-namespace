@@ -5,19 +5,11 @@ updates:
     schedule:
       interval: "weekly"
     # The Buf-generated Namespace Cloud modules (grpc/go and protocolbuffers/go)
-    # are tightly coupled to each other, to namespacelabs.dev/integrations@v0.0.10,
-    # and to retained protobuf fields in internal/services/github and
-    # internal/apicontract (e.g., CacheVolumeSettings.VolumeTag removed in
-    # 20261106090801-6db93b78d1d9). Group them together and ignore upstream
-    # Buf cloud module bumps until namespacelabs.dev/integrations and the
-    # provider schemas are updated together.
+    # are tightly coupled to each other and should be updated together.
     groups:
       namespace-cloud-sdk:
         patterns:
           - "buf.build/gen/go/namespace/*"
-          - "namespacelabs.dev/integrations"
-    ignore:
-      - dependency-name: "buf.build/gen/go/namespace/cloud/*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

@@ -38,7 +38,9 @@ type RegistryImageDataSourceModel struct {
 	Digest     types.String   `tfsdk:"digest"`
 	CreatedAt  types.String   `tfsdk:"created_at"`
 	ExpiresAt  types.String   `tfsdk:"expires_at"`
+	DeletedAt  types.String   `tfsdk:"deleted_at"`
 	SizeBytes  types.Int64    `tfsdk:"size_bytes"`
+	Labels     types.Map      `tfsdk:"labels"`
 	Tags       []types.String `tfsdk:"tags"`
 }
 
@@ -74,8 +76,17 @@ func (d *registryImageDataSource) Schema(ctx context.Context, req datasource.Sch
 				Description: "RFC3339 expiration timestamp, if configured.",
 				Computed:    true,
 			},
+			"deleted_at": schema.StringAttribute{
+				Description: "RFC3339 deletion timestamp, if the image has been soft-deleted.",
+				Computed:    true,
+			},
 			"size_bytes": schema.Int64Attribute{
 				Description: "Total size of the image in bytes.",
+				Computed:    true,
+			},
+			"labels": schema.MapAttribute{
+				Description: "Key-value labels attached to the image.",
+				ElementType: types.StringType,
 				Computed:    true,
 			},
 			"tags": schema.ListAttribute{
@@ -166,6 +177,14 @@ func (d *registryImageDataSource) Read(ctx context.Context, req datasource.ReadR
 	state.Digest = types.StringValue(img.GetDigest())
 	state.CreatedAt = tfutil.TimestampToTFString(img.GetCreatedAt())
 	state.ExpiresAt = tfutil.TimestampToTFString(img.GetExpiresAt())
+	state.DeletedAt = tfutil.TimestampToTFString(img.GetDeletedAt())
+
+	labelsVal, labelDiags := flattenImageLabels(ctx, img.GetLabels())
+	resp.Diagnostics.Append(labelDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	state.Labels = labelsVal
 
 	if sizes := img.GetSizes(); sizes != nil {
 		state.SizeBytes = types.Int64Value(sizes.GetTotal())

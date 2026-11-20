@@ -39,6 +39,7 @@ import (
 	"github.com/bsuv/terraform-provider-namespace/internal/apicontract"
 	"github.com/bsuv/terraform-provider-namespace/internal/client"
 	"github.com/bsuv/terraform-provider-namespace/internal/provider"
+	"github.com/bsuv/terraform-provider-namespace/internal/redact"
 	"github.com/bsuv/terraform-provider-namespace/internal/services/integrations"
 	"github.com/bsuv/terraform-provider-namespace/internal/testutil"
 )
@@ -582,32 +583,6 @@ func testAccEnsurePaginatedRegistryRepository(t *testing.T) string {
 	return envRepo
 }
 
-func testAccEnsureVolumeTag(t *testing.T, prefix string) (string, string) {
-	t.Helper()
-	testAccPreCheck(t)
-	runnerTag := testAccResourcePrefix("run-" + prefix)
-	if os.Getenv("TF_ACC") == "" {
-		return runnerTag, testAccResourcePrefix("vol-" + prefix)
-	}
-
-	if prefix == "cv-" {
-		if envTag := os.Getenv("NSC_TEST_CACHE_VOLUME_TAG"); envTag != "" {
-			return runnerTag, envTag
-		}
-		t.Fatalf("acceptance test requires a configured live cache volume tag: set NSC_TEST_CACHE_VOLUME_TAG")
-	}
-
-	if prefix == "pv-" {
-		if envTag := os.Getenv("NSC_TEST_PV_TAG"); envTag != "" {
-			return runnerTag, envTag
-		}
-		t.Fatalf("acceptance test requires a configured live persistent volume tag: set NSC_TEST_PV_TAG")
-	}
-
-	t.Fatalf("unsupported volume tag prefix %q: configure live fixture environment variable", prefix)
-	return "", ""
-}
-
 func testAccCleanupDefaultPolicy(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -776,21 +751,55 @@ func TestAccSecurity_SecretScrubbing(t *testing.T) {
 	t.Helper()
 
 	secrets := map[string]string{
-		"tenant token":        "nsct_" + "acceptance_secret_scrubbing_sentinel",
-		"workload token":      "nscw_" + "acceptance_secret_scrubbing_sentinel",
-		"user token":          "nscu_" + "acceptance_secret_scrubbing_sentinel",
-		"legacy token":        "tok_" + "acceptance_secret_scrubbing_sentinel",
-		"session token":       "st_" + "acceptance_secret_scrubbing_sentinel",
-		"jwt":                 "ey" + "JhbGciOiJSUzI1NiJ9" + "." + "ey" + "J0ZW5hbnRfaWQiOiJzZW50aW5lbCJ9" + "." + "signature_sentinel",
-		"rsa private key":     testutil.SynthesizePEMBlock("RSA PRIVATE KEY", "rsa-privkey-body-sentinel"),
-		"ec private key":      testutil.SynthesizePEMBlock("EC PRIVATE KEY", "ec-privkey-body-sentinel"),
-		"dsa private key":     testutil.SynthesizePEMBlock("DSA PRIVATE KEY", "dsa-privkey-body-sentinel"),
-		"openssh private key": testutil.SynthesizePEMBlock("OPENSSH PRIVATE KEY", "openssh-privkey-body-sentinel"),
-		"pkcs8 private key":   testutil.SynthesizePEMBlock("PRIVATE KEY", "pkcs8-data-sentinel"),
-		"certificate":         testutil.SynthesizePEMBlock("CERTIFICATE", "certificate-body-sentinel"),
-		"password":            "acceptance-password-sentinel",
-		"opaque bearer":       "opaque-acceptance-bearer-sentinel",
-		"opaque api key":      "opaque-acceptance-api-key-sentinel",
+		"tenant token":            "nsct_" + "acceptance_secret_scrubbing_sentinel",
+		"workload token":          "nscw_" + "acceptance_secret_scrubbing_sentinel",
+		"user token":              "nscu_" + "acceptance_secret_scrubbing_sentinel",
+		"revokable token":         "nsrt_" + "acceptance_revokable_secret_sentinel",
+		"legacy token":            "tok_" + "acceptance_secret_scrubbing_sentinel",
+		"session token":           "st_" + "acceptance_secret_scrubbing_sentinel",
+		"jwt":                     "ey" + "JhbGciOiJSUzI1NiJ9" + "." + "ey" + "J0ZW5hbnRfaWQiOiJzZW50aW5lbCJ9" + "." + "signature_sentinel",
+		"padded jwt":              "ey" + "JhbGciOiJIUzI1NiJ9" + "." + "ey" + "JzdWIiOiJzZW50aW5lbCJ9==" + "." + "c2ln==",
+		"oidc prefixed jwt":       "oidc_" + "ey" + "JhbGciOiJSUzI1NiJ9" + "." + "ey" + "J0ZW5hbnRfaWQiOiJvaWRjIn0=" + "." + "c2ln==",
+		"cognito jwt":             "cognito_" + "ey" + "JhbGciOiJSUzI1NiJ9" + "." + "ey" + "J0ZW5hbnRfaWQiOiJjb2duaXRvIn0" + "." + "sig_cognito",
+		"token spec":              "nsrt_" + "acceptance_token_spec_sentinel",
+		"token spec file":         "/run/secrets/acceptance-nsc-token-spec.json",
+		"colon obj token spec":    "/run/secrets/colon_obj_secret.json",
+		"deep token spec 1":       "/run/secrets/deep_1.json",
+		"deep token spec 2":       "/run/secrets/deep_2.json",
+		"in log token spec":       "/run/secrets/in_log.json",
+		"multiline token spec":    "/run/secrets/multiline_in_log.json",
+		"tab token spec":          "/run/secrets/tab_in_log.json",
+		"cr token spec":           "/run/secrets/cr_in_log.json",
+		"multiline token spec 2":  "/run/secrets/multiline_in_log2.json",
+		"auth bearer in json":     "secret_bearer_in_json_sentinel",
+		"auth basic in json":      "dXNlcjpwYXNzX3NlbnRpbmVs",
+		"short quoted bearer":     "short_tok",
+		"long quoted basic":       "dXNlcjpwYXNzd29yZF9sb25nX3NlY3JldF8xMjM0NTY3ODkwYWJjZGVm",
+		"short quoted basic json": "dXNlcjpwYXNz",
+		"escaped nl token":        "my_secret_tok",
+		"escaped quote pass":      "my_pass",
+		"escaped quote nsc_token": "my_secret_val",
+		"esc nl nsrt":             "nsrt_" + "esc_nl_revokable_123456",
+		"esc tab jwt":             "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiJ0YWJfc2VjIn0." + "tab_sig_123",
+		"esc nl oidc":             "oidc_" + "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiJubF9vaWRjIn0." + "nl_oidc_sig_123",
+		"esc nl spec obj":         "/run/secrets/esc_nl_obj_spec.json",
+		"esc nl nsc token obj":    "/run/secrets/esc_nl_obj_tok.json",
+		"esc nl auth bearer":      "esc_nl_short_bearer",
+		"esc nl auth basic":       "dXNlcjpwYXNzX2VzY19ubA==",
+		"esc nl pass":             "esc_nl_pass_secret",
+		"esc tab secret":          "esc_tab_secret_val",
+		"query pass":              "query_pw_secret_123",
+		"query token":             "query_tok_secret_123",
+		"passphrase":              "acceptance-passphrase-sentinel",
+		"rsa private key":         testutil.SynthesizePEMBlock("RSA PRIVATE KEY", "rsa-privkey-body-sentinel"),
+		"ec private key":          testutil.SynthesizePEMBlock("EC PRIVATE KEY", "ec-privkey-body-sentinel"),
+		"dsa private key":         testutil.SynthesizePEMBlock("DSA PRIVATE KEY", "dsa-privkey-body-sentinel"),
+		"openssh private key":     testutil.SynthesizePEMBlock("OPENSSH PRIVATE KEY", "openssh-privkey-body-sentinel"),
+		"pkcs8 private key":       testutil.SynthesizePEMBlock("PRIVATE KEY", "pkcs8-data-sentinel"),
+		"certificate":             testutil.SynthesizePEMBlock("CERTIFICATE", "certificate-body-sentinel"),
+		"password":                "acceptance-password-sentinel",
+		"opaque bearer":           "opaque-acceptance-bearer-sentinel",
+		"opaque api key":          "opaque-acceptance-api-key-sentinel",
 	}
 
 	payload := strings.Join([]string{
@@ -798,7 +807,41 @@ func TestAccSecurity_SecretScrubbing(t *testing.T) {
 		"NSC_TOKEN=" + secrets["workload token"],
 		"NSC_PARTNER_TOKEN=" + secrets["user token"],
 		"NSC_TOKEN_FILE=" + secrets["legacy token"],
+		"NSC_TOKEN_SPEC=" + secrets["token spec"],
+		`{"NSC_TOKEN_SPEC_FILE":"` + secrets["token spec file"] + `","NSC_TOKEN_SPEC":"` + secrets["token spec"] + `"}`,
+		`{"NSC_TOKEN_SPEC":{"file":"` + secrets["colon obj token spec"] + `"}}`,
+		`NSC_TOKEN_SPEC={"file":"` + secrets["token spec file"] + `"}`,
+		`NSC_TOKEN_SPEC={"auth":{"nested":{"file":"` + secrets["deep token spec 1"] + `"}},"path":"` + secrets["deep token spec 2"] + `"} ok=1`,
+		`{"log":"env NSC_TOKEN_SPEC={\"a\":\"x}y\",\"file\":\"` + secrets["in log token spec"] + `\"} failed"}`,
+		`{"log":"env NSC_TOKEN_SPEC={\n  \"a\":\"x}y\",\n  \"file\":\"` + secrets["multiline token spec"] + `\"\n} failed"}`,
+		`{"log":"env NSC_TOKEN_SPEC={\t\"a\":\"x}y\",\"file\":\"` + secrets["tab token spec"] + `\"} failed"}`,
+		`{"log":"env NSC_TOKEN_SPEC={\r  \"a\":\"x}y\",\r  \"file\":\"` + secrets["cr token spec"] + `\"\r} failed"}`,
+		`{"outer":"{\"log\":\"env NSC_TOKEN_SPEC={\\n  \\\"a\\\":\\\"x}y\\\",\\n  \\\"file\\\":\\\"` + secrets["multiline token spec 2"] + `\\\"\\n} failed\"}"}`,
+		`{"log":"authorization: Bearer ` + secrets["auth bearer in json"] + `"}`,
+		`{"log":"authorization: Basic ` + secrets["auth basic in json"] + `"}`,
+		`authorization="Bearer ` + secrets["short quoted bearer"] + `"`,
+		`authorization="Basic ` + secrets["long quoted basic"] + `"`,
+		`{"log":"authorization: \"Bearer ` + secrets["short quoted bearer"] + `\"","ok":1}`,
+		`{"log":"authorization: \"Basic ` + secrets["short quoted basic json"] + `\"","ok":1}`,
+		`authorization: "granted"`,
+		`{"log":"token: ` + secrets["escaped nl token"] + `\nnext_field: ok","ok":1}`,
+		`{"log":"got password=` + secrets["escaped quote pass"] + `\"}` + `"}`,
+		`{"log":"env NSC_TOKEN=` + secrets["escaped quote nsc_token"] + `\"}` + `"}`,
+		`{"log":"line1\n` + secrets["esc nl nsrt"] + `"}`,
+		`{"log":"jwt:\t` + secrets["esc tab jwt"] + `"}`,
+		`{"log":"jwt:\n` + secrets["esc nl oidc"] + `"}`,
+		`{"log":"env:\nNSC_TOKEN_SPEC={\"file\":\"` + secrets["esc nl spec obj"] + `\"}"}`,
+		`{"log":"env:\nNSC_TOKEN={\"file\":\"` + secrets["esc nl nsc token obj"] + `\"}"}`,
+		`{"log":"hdr:\nauthorization: Bearer ` + secrets["esc nl auth bearer"] + `\nauthorization: Basic ` + secrets["esc nl auth basic"] + `"}`,
+		`{"log":"err:\npassword=` + secrets["esc nl pass"] + `\tsecret=` + secrets["esc tab secret"] + `"}`,
+		`{"log":"literal:\\npassword=keep_literal_boundary"}`,
+		`url=https://example.invalid/auth?token=` + secrets["query token"] + `&password=` + secrets["query pass"] + `&safe=1`,
+		"PASSPHRASE=" + secrets["passphrase"],
 		"NSC_TRUSTED_JWT=" + secrets["jwt"],
+		"revokable=" + secrets["revokable token"],
+		"padded=" + secrets["padded jwt"],
+		"oidc=" + secrets["oidc prefixed jwt"],
+		"cognito=" + secrets["cognito jwt"],
 		"session_token=" + secrets["session token"],
 		"federation=" + secrets["jwt"],
 		secrets["rsa private key"],
@@ -822,7 +865,59 @@ func TestAccSecurity_SecretScrubbing(t *testing.T) {
 		}
 	}
 
-	assertScrubbed(client.RedactSecrets(payload))
+	firstPass := client.RedactSecrets(payload)
+	assertScrubbed(firstPass)
+	for _, wantLine := range []string{
+		`{"log":"env NSC_TOKEN_SPEC=[REDACTED] failed"}`,
+		`{"outer":"{\"log\":\"env NSC_TOKEN_SPEC=[REDACTED] failed\"}"}`,
+		`{"log":"authorization: Bearer [REDACTED TOKEN]"}`,
+		`{"log":"authorization: Basic [REDACTED SECRET]"}`,
+		`authorization="Bearer [REDACTED TOKEN]"`,
+		`authorization="Basic [REDACTED SECRET]"`,
+		`{"log":"authorization: \"Bearer [REDACTED TOKEN]\"","ok":1}`,
+		`{"log":"authorization: \"Basic [REDACTED SECRET]\"","ok":1}`,
+		`authorization: "granted"`,
+		`{"log":"token: [REDACTED TOKEN]\nnext_field: ok","ok":1}`,
+		`{"log":"got password=[REDACTED PASSWORD]\"}"}`,
+		`{"log":"env NSC_TOKEN=[REDACTED]\"}"}`,
+		`{"log":"line1\n[REDACTED TOKEN]"}`,
+		`{"log":"jwt:\t[REDACTED JWT]"}`,
+		`{"log":"jwt:\n[REDACTED JWT]"}`,
+		`{"log":"env:\nNSC_TOKEN_SPEC=[REDACTED]"}`,
+		`{"log":"env:\nNSC_TOKEN=[REDACTED]"}`,
+		`{"log":"hdr:\nauthorization: Bearer [REDACTED TOKEN]\nauthorization: Basic [REDACTED SECRET]"}`,
+		`{"log":"err:\npassword=[REDACTED PASSWORD]\tsecret=[REDACTED SECRET]"}`,
+		`{"log":"literal:\\npassword=keep_literal_boundary"}`,
+		`url=https://example.invalid/auth?token=[REDACTED TOKEN]&password=[REDACTED PASSWORD]&safe=1`,
+	} {
+		if !strings.Contains(firstPass, wantLine) {
+			t.Fatalf("expected scrubbed output to preserve framing %q, got:\n%s", wantLine, firstPass)
+		}
+		if strings.HasPrefix(wantLine, "{") && !json.Valid([]byte(wantLine)) {
+			t.Fatalf("expected JSON line to be valid JSON: %q", wantLine)
+		}
+	}
+	for _, line := range strings.Split(firstPass, "\n") {
+		if strings.HasPrefix(line, "{") && !json.Valid([]byte(line)) {
+			t.Fatalf("scrubbed JSON log line is invalid JSON: %q", line)
+		}
+	}
+	secondPass := client.RedactSecrets(firstPass)
+	if secondPass != firstPass {
+		t.Fatalf("RedactSecrets is not 2-pass idempotent:\nfirst:  %s\nsecond: %s", firstPass, secondPass)
+	}
+
+	userInput := `{"log":"username=u\"}"}`
+	userFirst := redact.CredentialUsernames(userInput)
+	if userFirst != `{"log":"username=[REDACTED SECRET]\"}"}` {
+		t.Fatalf("CredentialUsernames(%q) = %q", userInput, userFirst)
+	}
+	if !json.Valid([]byte(userFirst)) {
+		t.Fatalf("CredentialUsernames produced invalid JSON: %q", userFirst)
+	}
+	if userSecond := redact.CredentialUsernames(userFirst); userSecond != userFirst {
+		t.Fatalf("CredentialUsernames is not 2-pass idempotent: %q vs %q", userFirst, userSecond)
+	}
 
 	var debugOutput bytes.Buffer
 	interceptor := client.RedactingUnaryInterceptor(&debugOutput, true, true, "acceptance-redaction-test")
@@ -1881,7 +1976,7 @@ resource "namespace_tenant_group" "test" {
   name = %q
   policies = [
     {
-      policy = "namespace.cloud.iam.v1beta.AdminPolicy"
+      policy = "namespace.cloud.compute.v1beta.UsagePolicy"
       value  = "{}"
     }
   ]
@@ -1908,15 +2003,15 @@ resource "namespace_tenant_group" "test" {
   name = %q
   policies = [
     {
-      policy = "namespace.cloud.iam.v1beta.AdminPolicy"
-      value  = "{\"version\":2}"
+      policy = "namespace.cloud.compute.v1beta.UsagePolicy"
+      value  = "{\"concurrency_limits\":{\"max_instance_count\":20}}"
     }
   ]
 }
 `, testAccPartnerProviderConfig(), groupName),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("namespace_tenant_group.test", "name", groupName),
-					resource.TestCheckResourceAttr("namespace_tenant_group.test", "policies.0.value", "{\"version\":2}"),
+					resource.TestCheckResourceAttr("namespace_tenant_group.test", "policies.0.value", "{\"concurrency_limits\":{\"max_instance_count\":20}}"),
 					func(s *terraform.State) error {
 						t.Log(apicontract.FormatObservation(
 							apicontract.RPCTenantServiceFullLifecycle,
@@ -1976,16 +2071,16 @@ resource "namespace_tenant_group" "test" {
   name = %q
   policies = [
     {
-      policy = "namespace.cloud.iam.v1beta.AdminPolicy"
-      value  = jsonencode({ role = "viewer" })
+      policy = "namespace.cloud.compute.v1beta.UsagePolicy"
+      value  = jsonencode({ concurrency_limits = { max_cpu = 16 } })
     }
   ]
 }
 `, testAccPartnerProviderConfig(), groupName),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("namespace_tenant_group.test", "name", groupName),
-					resource.TestCheckResourceAttr("namespace_tenant_group.test", "policies.0.policy", "namespace.cloud.iam.v1beta.AdminPolicy"),
-					resource.TestCheckResourceAttr("namespace_tenant_group.test", "policies.0.value", `{"role":"viewer"}`),
+					resource.TestCheckResourceAttr("namespace_tenant_group.test", "policies.0.policy", "namespace.cloud.compute.v1beta.UsagePolicy"),
+					resource.TestCheckResourceAttr("namespace_tenant_group.test", "policies.0.value", `{"concurrency_limits":{"max_cpu":16}}`),
 				),
 			},
 			// Step 2: Intervening out-of-band writer modifies the tenant group directly via gRPC,
@@ -2013,8 +2108,8 @@ resource "namespace_tenant_group" "test" {
 						Name: groupName,
 						Policies: []*iamv1beta.TenantGroupPolicy{
 							{
-								Policy: "namespace.cloud.iam.v1beta.AdminPolicy",
-								Value:  `{"role":"editor","injected_by":"out_of_band"}`,
+								Policy: "namespace.cloud.compute.v1beta.UsagePolicy",
+								Value:  `{"concurrency_limits":{"max_cpu":64},"devbox_limits":{"max_count":5}}`,
 							},
 						},
 					})
@@ -2029,8 +2124,8 @@ resource "namespace_tenant_group" "test" {
   name = %q
   policies = [
     {
-      policy = "namespace.cloud.iam.v1beta.AdminPolicy"
-      value  = jsonencode({ role = "viewer" })
+      policy = "namespace.cloud.compute.v1beta.UsagePolicy"
+      value  = jsonencode({ concurrency_limits = { max_cpu = 16 } })
     }
   ]
 }
@@ -2038,7 +2133,7 @@ resource "namespace_tenant_group" "test" {
 				Check: resource.ComposeTestCheckFunc(
 					// Verify that Terraform detected drift and enforced authoritative configured state (last-writer-wins)
 					resource.TestCheckResourceAttr("namespace_tenant_group.test", "name", groupName),
-					resource.TestCheckResourceAttr("namespace_tenant_group.test", "policies.0.value", `{"role":"viewer"}`),
+					resource.TestCheckResourceAttr("namespace_tenant_group.test", "policies.0.value", `{"concurrency_limits":{"max_cpu":16}}`),
 					func(s *terraform.State) error {
 						t.Log(apicontract.FormatObservation(
 							apicontract.RPCTenantServiceEnsureTenantGroup,
@@ -2605,7 +2700,7 @@ resource "namespace_tenant_group" "test" {
   name = %q
   policies = [
     {
-      policy = "namespace.cloud.iam.v1beta.AdminPolicy"
+      policy = "namespace.cloud.compute.v1beta.UsagePolicy"
       value  = "{}"
     }
   ]
@@ -3059,7 +3154,15 @@ ephemeral "namespace_bazel_cache" "deferred_cache" {
 // -----------------------------------------------------------------------------
 
 func TestAccDataSource_CacheVolumeSummary(t *testing.T) {
-	runnerTag, cacheTag := testAccEnsureVolumeTag(t, "cv-")
+	testAccPreCheck(t)
+	runnerTag := testAccResourcePrefix("run-cv-")
+	cacheTag := testAccResourcePrefix("vol-cv-")
+	if os.Getenv("TF_ACC") != "" {
+		cacheTag = strings.TrimSpace(os.Getenv("NSC_TEST_CACHE_VOLUME_TAG"))
+		if cacheTag == "" {
+			t.Fatalf("acceptance test requires a configured live cache volume tag: set NSC_TEST_CACHE_VOLUME_TAG")
+		}
+	}
 	testAccCleanupRunnerProfile(t, runnerTag)
 
 	resource.Test(t, resource.TestCase{
@@ -3077,14 +3180,13 @@ resource "namespace_github_runner_profile" "prereq" {
   description  = "Cache volume summary prerequisite profile"
   cache_volume_settings = [
     {
-      volume_tag     = %q
       volume_size_gb = 50
     }
   ]
 }
 
 data "namespace_cache_volume_summary" "test" {
-  tag = namespace_github_runner_profile.prereq.cache_volume_settings[0].volume_tag
+  tag = %q
 }
 `, testAccProviderConfig(), runnerTag, cacheTag),
 				Check: resource.ComposeTestCheckFunc(
@@ -3110,7 +3212,15 @@ data "namespace_cache_volume_summary" "test" {
 }
 
 func TestAccDataSource_PersistentVolume(t *testing.T) {
-	runnerTag, pvTag := testAccEnsureVolumeTag(t, "pv-")
+	testAccPreCheck(t)
+	runnerTag := testAccResourcePrefix("run-pv-")
+	pvTag := testAccResourcePrefix("vol-pv-")
+	if os.Getenv("TF_ACC") != "" {
+		pvTag = strings.TrimSpace(os.Getenv("NSC_TEST_PV_TAG"))
+		if pvTag == "" {
+			t.Fatalf("acceptance test requires a configured live persistent volume tag: set NSC_TEST_PV_TAG")
+		}
+	}
 	testAccCleanupRunnerProfile(t, runnerTag)
 
 	resource.Test(t, resource.TestCase{
@@ -3128,14 +3238,13 @@ resource "namespace_github_runner_profile" "prereq" {
   description  = "Persistent volume lookup prerequisite profile"
   cache_volume_settings = [
     {
-      volume_tag     = %q
       volume_size_gb = 50
     }
   ]
 }
 
 data "namespace_persistent_volume" "test" {
-  tag = namespace_github_runner_profile.prereq.cache_volume_settings[0].volume_tag
+  tag = %q
 }
 `, testAccProviderConfig(), runnerTag, pvTag),
 				Check: resource.ComposeTestCheckFunc(
@@ -3739,7 +3848,7 @@ func TestAccMatrix_CollisionPrevention(t *testing.T) {
 						Name: groupName,
 						Policies: []*iamv1beta.TenantGroupPolicy{
 							{
-								Policy: "namespace.cloud.iam.v1beta.AdminPolicy",
+								Policy: "namespace.cloud.compute.v1beta.UsagePolicy",
 								Value:  "{}",
 							},
 						},
@@ -3755,7 +3864,7 @@ resource "namespace_tenant_group" "collision" {
   name = %q
   policies = [
     {
-      policy = "namespace.cloud.iam.v1beta.AdminPolicy"
+      policy = "namespace.cloud.compute.v1beta.UsagePolicy"
       value  = "{}"
     }
   ]

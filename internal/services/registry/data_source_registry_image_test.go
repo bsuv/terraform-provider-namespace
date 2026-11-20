@@ -7,6 +7,7 @@ import (
 	"time"
 
 	registryv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/registry/v1beta"
+	stdlib "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/stdlib"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -57,7 +58,7 @@ func TestRegistryImageDataSource_Schema(t *testing.T) {
 	}
 
 	attrs := schemaResp.Schema.Attributes
-	for _, attrName := range []string{"id", "repository", "reference", "digest", "created_at", "expires_at", "size_bytes", "tags"} {
+	for _, attrName := range []string{"id", "repository", "reference", "digest", "created_at", "expires_at", "deleted_at", "size_bytes", "labels", "tags"} {
 		if _, ok := attrs[attrName]; !ok {
 			t.Errorf("missing expected attribute %q", attrName)
 		}
@@ -114,7 +115,9 @@ func TestRegistryImageDataSource_Read_ByTag(t *testing.T) {
 		Digest:     types.StringNull(),
 		CreatedAt:  types.StringNull(),
 		ExpiresAt:  types.StringNull(),
+		DeletedAt:  types.StringNull(),
 		SizeBytes:  types.Int64Null(),
+		Labels:     types.MapNull(types.StringType),
 		Tags:       nil,
 	}
 
@@ -182,7 +185,9 @@ func TestRegistryImageDataSource_Read_NotFound(t *testing.T) {
 		Digest:     types.StringNull(),
 		CreatedAt:  types.StringNull(),
 		ExpiresAt:  types.StringNull(),
+		DeletedAt:  types.StringNull(),
 		SizeBytes:  types.Int64Null(),
+		Labels:     types.MapNull(types.StringType),
 		Tags:       nil,
 	}
 
@@ -230,7 +235,9 @@ func TestRegistryImageDataSource_Read_NotFound_RedactsSecrets(t *testing.T) {
 		Digest:     types.StringNull(),
 		CreatedAt:  types.StringNull(),
 		ExpiresAt:  types.StringNull(),
+		DeletedAt:  types.StringNull(),
 		SizeBytes:  types.Int64Null(),
+		Labels:     types.MapNull(types.StringType),
 		Tags:       nil,
 	}
 
@@ -262,4 +269,111 @@ func TestRegistryImageDataSource_Read_NotFound_RedactsSecrets(t *testing.T) {
 			t.Errorf("expected redaction marker %q in detail: %s", marker, detail)
 		}
 	}
+}
+
+func TestRegistryImageDataSource_Read_DeletedAtAndLabels(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("populated deleted_at and labels", func(t *testing.T) {
+		srv := testutil.NewMockServer()
+		deletedTime := time.Date(2026, 11, 8, 9, 10, 11, 0, time.UTC)
+
+		srv.Registry.GetImageFunc = func(ctx context.Context, req *registryv1beta.GetImageRequest) (*registryv1beta.GetImageResponse, error) {
+			return &registryv1beta.GetImageResponse{
+				Image: &registryv1beta.Image{
+					Repository: "my-app",
+					Digest:     "sha256:del1",
+					CreatedAt:  timestamppb.New(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)),
+					DeletedAt:  timestamppb.New(deletedTime),
+					Labels: []*stdlib.Label{
+						{Name: "team", Value: "infra"},
+						nil,
+						{Name: "tier", Value: "prod"},
+					},
+					Tags: []string{"v1"},
+				},
+			}, nil
+		}
+
+		d, schemaResp := setupTestDataSourceRegistryImage(t, srv)
+		cfg := registry.RegistryImageDataSourceModel{
+			ID:         types.StringNull(),
+			Repository: types.StringValue("my-app"),
+			Reference:  types.StringValue("v1"),
+			Digest:     types.StringNull(),
+			CreatedAt:  types.StringNull(),
+			ExpiresAt:  types.StringNull(),
+			DeletedAt:  types.StringNull(),
+			SizeBytes:  types.Int64Null(),
+			Labels:     types.MapNull(types.StringType),
+			Tags:       nil,
+		}
+		st := tfsdk.State{Schema: schemaResp.Schema}
+		if diags := st.Set(ctx, &cfg); diags.HasError() {
+			t.Fatalf("failed to set config: %v", diags)
+		}
+
+		resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+		d.Read(ctx, datasource.ReadRequest{Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: st.Raw}}, resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("unexpected read errors: %v", resp.Diagnostics)
+		}
+
+		var state registry.RegistryImageDataSourceModel
+		if diags := resp.State.Get(ctx, &state); diags.HasError() {
+			t.Fatalf("failed to get state: %v", diags)
+		}
+		if state.DeletedAt.ValueString() != deletedTime.Format(time.RFC3339Nano) {
+			t.Errorf("expected deleted_at %q, got %q", deletedTime.Format(time.RFC3339Nano), state.DeletedAt.ValueString())
+		}
+		var lbls map[string]string
+		if diags := state.Labels.ElementsAs(ctx, &lbls, false); diags.HasError() {
+			t.Fatalf("failed to extract labels: %v", diags)
+		}
+		if lbls["team"] != "infra" || lbls["tier"] != "prod" || len(lbls) != 2 {
+			t.Errorf("unexpected labels: %#v", lbls)
+		}
+	})
+
+	t.Run("null deleted_at and empty labels map", func(t *testing.T) {
+		srv := testutil.NewMockServer()
+		srv.Registry.GetImageFunc = func(ctx context.Context, req *registryv1beta.GetImageRequest) (*registryv1beta.GetImageResponse, error) {
+			return &registryv1beta.GetImageResponse{
+				Image: &registryv1beta.Image{
+					Repository: "my-app",
+					Digest:     "sha256:empty1",
+					CreatedAt:  timestamppb.New(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)),
+				},
+			}, nil
+		}
+
+		d, schemaResp := setupTestDataSourceRegistryImage(t, srv)
+		cfg := registry.RegistryImageDataSourceModel{
+			ID:         types.StringNull(),
+			Repository: types.StringValue("my-app"),
+			Reference:  types.StringValue("sha256:empty1"),
+			Digest:     types.StringNull(),
+			CreatedAt:  types.StringNull(),
+			ExpiresAt:  types.StringNull(),
+			DeletedAt:  types.StringNull(),
+			SizeBytes:  types.Int64Null(),
+			Labels:     types.MapNull(types.StringType),
+			Tags:       nil,
+		}
+		st := tfsdk.State{Schema: schemaResp.Schema}
+		_ = st.Set(ctx, &cfg)
+		resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+		d.Read(ctx, datasource.ReadRequest{Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: st.Raw}}, resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("unexpected read errors: %v", resp.Diagnostics)
+		}
+		var state registry.RegistryImageDataSourceModel
+		_ = resp.State.Get(ctx, &state)
+		if !state.DeletedAt.IsNull() {
+			t.Errorf("expected null deleted_at, got %v", state.DeletedAt)
+		}
+		if state.Labels.IsNull() || len(state.Labels.Elements()) != 0 {
+			t.Errorf("expected non-null empty map {} for empty labels, got %v", state.Labels)
+		}
+	})
 }

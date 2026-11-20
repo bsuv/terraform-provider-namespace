@@ -60,7 +60,7 @@ Read-Only:
 
 - `description` (String) Description of the base image.
 - `id` (String) Base image unique identifier.
-- `os` (String) Compute OS family (`linux`, `macos`).
+- `os` (String) Compute OS family (`linux`, `macos`, `windows`).
 - `os_build` (String) OS build identifier.
 - `os_name` (String) Human-friendly OS distribution name.
 - `os_version` (String) OS distribution version.

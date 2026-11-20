@@ -9,6 +9,7 @@ import (
 
 	computev1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/compute/v1beta"
 	githubv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/github/v1beta"
+	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
 	stdlib "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/stdlib"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -33,6 +34,7 @@ var (
 	_ resource.ResourceWithConfigure        = &runnerProfileResource{}
 	_ resource.ResourceWithImportState      = &runnerProfileResource{}
 	_ resource.ResourceWithConfigValidators = &runnerProfileResource{}
+	_ resource.ResourceWithUpgradeState     = &runnerProfileResource{}
 )
 
 // NewRunnerProfileResource creates a new runner profile resource instance.
@@ -60,8 +62,14 @@ var (
 	}
 	InstanceShapeObjectType = types.ObjectType{AttrTypes: InstanceShapeAttrTypes}
 
+	CustomPermissionAttrTypes = map[string]attr.Type{
+		"resource_type": types.StringType,
+		"resource_id":   types.StringType,
+		"actions":       types.ListType{ElemType: types.StringType},
+	}
+	CustomPermissionObjectType = types.ObjectType{AttrTypes: CustomPermissionAttrTypes}
+
 	CacheVolumeSettingAttrTypes = map[string]attr.Type{
-		"volume_tag":                   types.StringType,
 		"volume_size_gb":               types.Int64Type,
 		"volume_reserved_size_gb":      types.Int64Type,
 		"bundled_container_cache":      types.BoolType,
@@ -122,6 +130,7 @@ type RunnerProfileResourceModel struct {
 	SwapSizeMB            types.Int64  `tfsdk:"swap_size_mb"`
 	BuilderMode           types.String `tfsdk:"builder_mode"`
 	AccessLevel           types.String `tfsdk:"access_level"`
+	CustomPermissions     types.List   `tfsdk:"custom_permissions"`
 	ExperimentalFeatures  types.List   `tfsdk:"experimental_features"`
 	InstanceShape         types.Object `tfsdk:"instance_shape"`
 	CacheVolumeSettings   types.List   `tfsdk:"cache_volume_settings"`
@@ -143,16 +152,21 @@ type LabelModel struct {
 	Value types.String `tfsdk:"value"`
 }
 
+type CustomPermissionModel struct {
+	ResourceType types.String `tfsdk:"resource_type"`
+	ResourceID   types.String `tfsdk:"resource_id"`
+	Actions      types.List   `tfsdk:"actions"`
+}
+
 type CacheVolumeSettingModel struct {
-	VolumeTag                 types.String `tfsdk:"volume_tag"`
-	VolumeSizeGB              types.Int64  `tfsdk:"volume_size_gb"`
-	VolumeReservedSizeGB      types.Int64  `tfsdk:"volume_reserved_size_gb"`
-	BundledContainerCache     types.Bool   `tfsdk:"bundled_container_cache"`
-	BundledBuildkitCache      types.Bool   `tfsdk:"bundled_buildkit_cache"`
-	BundledGitMirror          types.Bool   `tfsdk:"bundled_git_mirror"`
-	BundledRunnerToolsCache   types.Bool   `tfsdk:"bundled_runner_tools_cache"`
-	BundledRunnerActionsCache types.Bool   `tfsdk:"bundled_runner_actions_cache"`
-	AllowCommitFromBranch     types.List   `tfsdk:"allow_commit_from_branch"`
+	VolumeSizeGB              types.Int64 `tfsdk:"volume_size_gb"`
+	VolumeReservedSizeGB      types.Int64 `tfsdk:"volume_reserved_size_gb"`
+	BundledContainerCache     types.Bool  `tfsdk:"bundled_container_cache"`
+	BundledBuildkitCache      types.Bool  `tfsdk:"bundled_buildkit_cache"`
+	BundledGitMirror          types.Bool  `tfsdk:"bundled_git_mirror"`
+	BundledRunnerToolsCache   types.Bool  `tfsdk:"bundled_runner_tools_cache"`
+	BundledRunnerActionsCache types.Bool  `tfsdk:"bundled_runner_actions_cache"`
+	AllowCommitFromBranch     types.List  `tfsdk:"allow_commit_from_branch"`
 }
 
 type CustomRunnerImageSpecModel struct {
@@ -191,6 +205,7 @@ func (r *runnerProfileResource) Metadata(ctx context.Context, req resource.Metad
 
 func (r *runnerProfileResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
+		Version:     1,
 		Description: "Manages a Namespace Cloud GitHub Actions runner profile, configuring virtual instance compute specs, persistent cache attachments, image customizations, and egress network policies.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
@@ -263,11 +278,35 @@ func (r *runnerProfileResource) Schema(ctx context.Context, req resource.SchemaR
 				},
 			},
 			"access_level": schema.StringAttribute{
-				Description: "Controls which Namespace features the runner workload can access (`ACCESS_LEVEL_UNSPECIFIED`, `ACCESS_LEVEL_PERMISSIVE`, `ACCESS_LEVEL_LIMITED`, `ACCESS_LEVEL_RESTRICTED`).",
+				Description: "Controls which Namespace features the runner workload can access (`ACCESS_LEVEL_UNSPECIFIED`, `ACCESS_LEVEL_PERMISSIVE`, `ACCESS_LEVEL_LIMITED`, `ACCESS_LEVEL_RESTRICTED`, `ACCESS_LEVEL_CUSTOM`).",
 				Optional:    true,
 				Computed:    true,
 				Validators: []validator.String{
-					stringvalidator.OneOf("ACCESS_LEVEL_UNSPECIFIED", "ACCESS_LEVEL_PERMISSIVE", "ACCESS_LEVEL_LIMITED", "ACCESS_LEVEL_RESTRICTED"),
+					stringvalidator.OneOf("ACCESS_LEVEL_UNSPECIFIED", "ACCESS_LEVEL_PERMISSIVE", "ACCESS_LEVEL_LIMITED", "ACCESS_LEVEL_RESTRICTED", "ACCESS_LEVEL_CUSTOM"),
+				},
+			},
+			"custom_permissions": schema.ListNestedAttribute{
+				Description: "Granular IAM permission grants when `access_level` is `ACCESS_LEVEL_CUSTOM`.",
+				Optional:    true,
+				NestedObject: schema.NestedAttributeObject{
+					Attributes: map[string]schema.Attribute{
+						"resource_type": schema.StringAttribute{
+							Description: "Resource type identifier (e.g. `vault/object`, `cache/bazel`).",
+							Required:    true,
+							Validators: []validator.String{
+								tfutil.NonEmptyString(),
+							},
+						},
+						"resource_id": schema.StringAttribute{
+							Description: "Target resource identifier, or empty string `\"\"` for all resources of this type.",
+							Required:    true,
+						},
+						"actions": schema.ListAttribute{
+							Description: "List of allowed action strings.",
+							ElementType: types.StringType,
+							Required:    true,
+						},
+					},
 				},
 			},
 			"experimental_features": schema.ListAttribute{
@@ -306,11 +345,11 @@ func (r *runnerProfileResource) Schema(ctx context.Context, req resource.SchemaR
 						},
 					},
 					"os": schema.StringAttribute{
-						Description: "Compute OS family (`linux`, `macos`).",
+						Description: "Compute OS family (`linux`, `macos`, `windows`).",
 						Optional:    true,
 						Computed:    true,
 						Validators: []validator.String{
-							stringvalidator.OneOf("linux", "macos", ""),
+							stringvalidator.OneOf("linux", "macos", "windows", ""),
 						},
 					},
 					"selectors": schema.ListNestedAttribute{
@@ -344,13 +383,6 @@ func (r *runnerProfileResource) Schema(ctx context.Context, req resource.SchemaR
 				Computed:    true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
-						"volume_tag": schema.StringAttribute{
-							Description: "Unique identifier for this cache volume within the profile.",
-							Required:    true,
-							Validators: []validator.String{
-								tfutil.NonEmptyString(),
-							},
-						},
 						"volume_size_gb": schema.Int64Attribute{
 							Description: "Total size of the cache volume in gigabytes.",
 							Required:    true,
@@ -544,11 +576,20 @@ func (v runnerProfileConfigValidator) ValidateResource(ctx context.Context, req 
 
 	// 2. Cache volume settings: volume_reserved_size_gb must be < volume_size_gb
 	if !config.CacheVolumeSettings.IsNull() && !config.CacheVolumeSettings.IsUnknown() {
-		var cvSettings []CacheVolumeSettingModel
-		diags := config.CacheVolumeSettings.ElementsAs(ctx, &cvSettings, false)
+		var cvObjs []types.Object
+		diags := config.CacheVolumeSettings.ElementsAs(ctx, &cvObjs, false)
 		resp.Diagnostics.Append(diags...)
 		if !resp.Diagnostics.HasError() {
-			for idx, cv := range cvSettings {
+			for idx, cvObj := range cvObjs {
+				if cvObj.IsNull() || cvObj.IsUnknown() {
+					continue
+				}
+				var cv CacheVolumeSettingModel
+				d := cvObj.As(ctx, &cv, basetypes.ObjectAsOptions{})
+				resp.Diagnostics.Append(d...)
+				if d.HasError() {
+					continue
+				}
 				if !cv.VolumeSizeGB.IsNull() && !cv.VolumeSizeGB.IsUnknown() &&
 					!cv.VolumeReservedSizeGB.IsNull() && !cv.VolumeReservedSizeGB.IsUnknown() {
 					size := cv.VolumeSizeGB.ValueInt64()
@@ -572,7 +613,7 @@ func (v runnerProfileConfigValidator) ValidateResource(ctx context.Context, req 
 		diags := config.NetworkPolicy.As(ctx, &np, basetypes.ObjectAsOptions{})
 		resp.Diagnostics.Append(diags...)
 		if !resp.Diagnostics.HasError() {
-			if !np.Advisory.IsNull() && !np.Advisory.IsUnknown() && np.Advisory.ValueBool() {
+			if !np.Advisory.IsNull() && !np.Advisory.IsUnknown() && np.Advisory.ValueBool() && !np.Egress.IsNull() && !np.Egress.IsUnknown() {
 				egress := np.Egress.ValueString()
 				if egress != "EGRESS_POLICY_DOMAIN_ALLOW_LIST" {
 					resp.Diagnostics.AddAttributeError(
@@ -587,7 +628,7 @@ func (v runnerProfileConfigValidator) ValidateResource(ctx context.Context, req 
 				egress := np.Egress.ValueString()
 				switch egress {
 				case "EGRESS_POLICY_DOMAIN_ALLOW_LIST":
-					if np.EgressDomainAllowList.IsNull() || np.EgressDomainAllowList.IsUnknown() || len(np.EgressDomainAllowList.Elements()) == 0 {
+					if np.EgressDomainAllowList.IsNull() || (!np.EgressDomainAllowList.IsUnknown() && len(np.EgressDomainAllowList.Elements()) == 0) {
 						resp.Diagnostics.AddAttributeError(
 							path.Root("network_policy").AtName("egress_domain_allow_list"),
 							"Missing Required Allow List",
@@ -602,7 +643,7 @@ func (v runnerProfileConfigValidator) ValidateResource(ctx context.Context, req 
 						)
 					}
 				case "EGRESS_POLICY_TAG":
-					if np.EgressPolicyTag.IsNull() || np.EgressPolicyTag.IsUnknown() || strings.TrimSpace(np.EgressPolicyTag.ValueString()) == "" {
+					if np.EgressPolicyTag.IsNull() || (!np.EgressPolicyTag.IsUnknown() && strings.TrimSpace(np.EgressPolicyTag.ValueString()) == "") {
 						resp.Diagnostics.AddAttributeError(
 							path.Root("network_policy").AtName("egress_policy_tag"),
 							"Missing Required Egress Policy Tag",
@@ -859,9 +900,36 @@ func buildRunnerProfileSpec(ctx context.Context, model RunnerProfileResourceMode
 
 	// AccessLevel
 	if !model.AccessLevel.IsNull() && !model.AccessLevel.IsUnknown() {
-		alVal, ok := githubv1beta.AccessLevel_value[model.AccessLevel.ValueString()]
-		if ok {
+		rawLevel := model.AccessLevel.ValueString()
+		if alVal, ok := githubv1beta.AccessLevel_value[rawLevel]; ok {
 			spec.AccessLevel = githubv1beta.AccessLevel(alVal)
+		} else if rawLevel == "4" {
+			spec.AccessLevel = githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM
+		} else {
+			tfutil.AddAttributeErrorf(
+				&diags,
+				path.Root("access_level"),
+				"Invalid Access Level",
+				"Unsupported access_level value %q.", rawLevel,
+			)
+		}
+	}
+
+	// CustomPermissions
+	if !model.CustomPermissions.IsNull() && !model.CustomPermissions.IsUnknown() {
+		var cpModels []CustomPermissionModel
+		d := model.CustomPermissions.ElementsAs(ctx, &cpModels, false)
+		diags.Append(d...)
+		if !diags.HasError() {
+			for _, cp := range cpModels {
+				actions, d := tfToStringSlice(ctx, cp.Actions)
+				diags.Append(d...)
+				spec.CustomPermissions = append(spec.CustomPermissions, &iamv1beta.Permission{
+					ResourceType: cp.ResourceType.ValueString(),
+					ResourceId:   cp.ResourceID.ValueString(),
+					Actions:      actions,
+				})
+			}
 		}
 	}
 
@@ -910,7 +978,6 @@ func buildRunnerProfileSpec(ctx context.Context, model RunnerProfileResourceMode
 				diags.Append(d...)
 
 				spec.CacheVolumeSettings = append(spec.CacheVolumeSettings, &githubv1beta.CacheVolumeSettings{
-					VolumeTag:                 cv.VolumeTag.ValueString(),
 					VolumeSizeGb:              int32(cv.VolumeSizeGB.ValueInt64()),
 					VolumeReservedSizeGb:      int32(cv.VolumeReservedSizeGB.ValueInt64()),
 					BundledContainerCache:     cv.BundledContainerCache.ValueBool(),
@@ -997,6 +1064,12 @@ func flattenRunnerProfile(ctx context.Context, profile *githubv1beta.RunnerProfi
 	var diags diag.Diagnostics
 
 	// Save planned / existing list attributes to preserve explicit empty lists ([] vs null)
+	plannedCustomPerms := target.CustomPermissions
+	var plannedCustomPermModels []CustomPermissionModel
+	if !target.CustomPermissions.IsNull() && !target.CustomPermissions.IsUnknown() {
+		_ = target.CustomPermissions.ElementsAs(ctx, &plannedCustomPermModels, false)
+	}
+
 	plannedExpFeatures := target.ExperimentalFeatures
 	plannedCVSettings := target.CacheVolumeSettings
 	var plannedCVModels []CacheVolumeSettingModel
@@ -1048,6 +1121,7 @@ func flattenRunnerProfile(ctx context.Context, profile *githubv1beta.RunnerProfi
 		target.SwapSizeMB = types.Int64Null()
 		target.BuilderMode = types.StringNull()
 		target.AccessLevel = types.StringNull()
+		target.CustomPermissions = types.ListNull(CustomPermissionObjectType)
 		target.ExperimentalFeatures = types.ListNull(types.StringType)
 		target.InstanceShape = types.ObjectNull(InstanceShapeAttrTypes)
 		target.CacheVolumeSettings = types.ListNull(CacheVolumeSettingObjectType)
@@ -1063,7 +1137,43 @@ func flattenRunnerProfile(ctx context.Context, profile *githubv1beta.RunnerProfi
 	target.Emoji = types.StringValue(spec.GetEmoji())
 	target.SwapSizeMB = types.Int64Value(int64(spec.GetSwapSizeMb()))
 	target.BuilderMode = types.StringValue(spec.GetBuilderMode().String())
-	target.AccessLevel = types.StringValue(spec.GetAccessLevel().String())
+	target.AccessLevel = types.StringValue(accessLevelToString(spec.GetAccessLevel()))
+
+	// CustomPermissions
+	if len(spec.GetCustomPermissions()) > 0 {
+		var cpObjects []attr.Value
+		for i, p := range spec.GetCustomPermissions() {
+			var actionsList types.List
+			if len(p.GetActions()) > 0 {
+				aList, d := stringSliceToTF(ctx, p.GetActions())
+				diags.Append(d...)
+				actionsList = aList
+			} else if i < len(plannedCustomPermModels) && plannedCustomPermModels[i].Actions.IsNull() {
+				actionsList = types.ListNull(types.StringType)
+			} else {
+				aList, d := types.ListValue(types.StringType, []attr.Value{})
+				diags.Append(d...)
+				actionsList = aList
+			}
+
+			cpObj, d := types.ObjectValue(CustomPermissionAttrTypes, map[string]attr.Value{
+				"resource_type": types.StringValue(p.GetResourceType()),
+				"resource_id":   types.StringValue(p.GetResourceId()),
+				"actions":       actionsList,
+			})
+			diags.Append(d...)
+			cpObjects = append(cpObjects, cpObj)
+		}
+		cpList, d := types.ListValue(CustomPermissionObjectType, cpObjects)
+		diags.Append(d...)
+		target.CustomPermissions = cpList
+	} else if isExplicitEmptyList(plannedCustomPerms) {
+		cpList, d := types.ListValue(CustomPermissionObjectType, []attr.Value{})
+		diags.Append(d...)
+		target.CustomPermissions = cpList
+	} else {
+		target.CustomPermissions = types.ListNull(CustomPermissionObjectType)
+	}
 
 	// ExperimentalFeatures
 	if len(spec.GetExperimentalFeatures()) > 0 {
@@ -1123,12 +1233,6 @@ func flattenRunnerProfile(ctx context.Context, profile *githubv1beta.RunnerProfi
 			if i < len(plannedCVModels) {
 				plannedBranches = plannedCVModels[i].AllowCommitFromBranch
 			}
-			for _, pcv := range plannedCVModels {
-				if !pcv.VolumeTag.IsNull() && !pcv.VolumeTag.IsUnknown() && pcv.VolumeTag.ValueString() == cv.GetVolumeTag() {
-					plannedBranches = pcv.AllowCommitFromBranch
-					break
-				}
-			}
 
 			var branches types.List
 			if len(cv.GetAllowCommitFromBranch()) > 0 {
@@ -1144,7 +1248,6 @@ func flattenRunnerProfile(ctx context.Context, profile *githubv1beta.RunnerProfi
 			}
 
 			cvObj, d := types.ObjectValue(CacheVolumeSettingAttrTypes, map[string]attr.Value{
-				"volume_tag":                   types.StringValue(cv.GetVolumeTag()),
 				"volume_size_gb":               types.Int64Value(int64(cv.GetVolumeSizeGb())),
 				"volume_reserved_size_gb":      types.Int64Value(int64(cv.GetVolumeReservedSizeGb())),
 				"bundled_container_cache":      types.BoolValue(cv.GetBundledContainerCache()),
@@ -1298,11 +1401,276 @@ func tfToStringSlice(ctx context.Context, list types.List) ([]string, diag.Diagn
 	if list.IsNull() || list.IsUnknown() {
 		return nil, nil
 	}
-	var res []string
-	diags := list.ElementsAs(ctx, &res, false)
+	var elems []types.String
+	diags := list.ElementsAs(ctx, &elems, false)
+	if diags.HasError() {
+		return nil, diags
+	}
+	res := make([]string, 0, len(elems))
+	for _, el := range elems {
+		if el.IsNull() {
+			continue
+		}
+		if el.IsUnknown() {
+			diags.AddError(
+				"Unexpected Unknown List Element",
+				"List contains an unknown string element that cannot be converted.",
+			)
+			return nil, diags
+		}
+		res = append(res, el.ValueString())
+	}
 	return res, diags
 }
 
 func isExplicitEmptyList(val types.List) bool {
 	return !val.IsNull() && !val.IsUnknown() && len(val.Elements()) == 0
+}
+
+func accessLevelToString(level githubv1beta.AccessLevel) string {
+	if level == githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM || level.String() == "4" {
+		return githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM.String()
+	}
+	return level.String()
+}
+
+type runnerProfileResourceModelV0 struct {
+	ID                    types.String `tfsdk:"id"`
+	ProfileID             types.String `tfsdk:"profile_id"`
+	Version               types.Int64  `tfsdk:"version"`
+	CreatedAt             types.String `tfsdk:"created_at"`
+	UpdatedAt             types.String `tfsdk:"updated_at"`
+	Tag                   types.String `tfsdk:"tag"`
+	Description           types.String `tfsdk:"description"`
+	OS                    types.String `tfsdk:"os"`
+	Emoji                 types.String `tfsdk:"emoji"`
+	SwapSizeMB            types.Int64  `tfsdk:"swap_size_mb"`
+	BuilderMode           types.String `tfsdk:"builder_mode"`
+	AccessLevel           types.String `tfsdk:"access_level"`
+	ExperimentalFeatures  types.List   `tfsdk:"experimental_features"`
+	InstanceShape         types.Object `tfsdk:"instance_shape"`
+	CacheVolumeSettings   types.List   `tfsdk:"cache_volume_settings"`
+	CustomRunnerImageSpec types.Object `tfsdk:"custom_runner_image_spec"`
+	NetworkPolicy         types.Object `tfsdk:"network_policy"`
+	CustomRunnerImages    types.List   `tfsdk:"custom_runner_images"`
+}
+
+type cacheVolumeSettingModelV0 struct {
+	VolumeTag                 types.String `tfsdk:"volume_tag"`
+	VolumeSizeGB              types.Int64  `tfsdk:"volume_size_gb"`
+	VolumeReservedSizeGB      types.Int64  `tfsdk:"volume_reserved_size_gb"`
+	BundledContainerCache     types.Bool   `tfsdk:"bundled_container_cache"`
+	BundledBuildkitCache      types.Bool   `tfsdk:"bundled_buildkit_cache"`
+	BundledGitMirror          types.Bool   `tfsdk:"bundled_git_mirror"`
+	BundledRunnerToolsCache   types.Bool   `tfsdk:"bundled_runner_tools_cache"`
+	BundledRunnerActionsCache types.Bool   `tfsdk:"bundled_runner_actions_cache"`
+	AllowCommitFromBranch     types.List   `tfsdk:"allow_commit_from_branch"`
+}
+
+func runnerProfileSchemaV0() *schema.Schema {
+	return &schema.Schema{
+		Version: 0,
+		Attributes: map[string]schema.Attribute{
+			"id":         schema.StringAttribute{Computed: true},
+			"profile_id": schema.StringAttribute{Computed: true},
+			"version":    schema.Int64Attribute{Computed: true},
+			"created_at": schema.StringAttribute{Computed: true},
+			"updated_at": schema.StringAttribute{Computed: true},
+			"tag":        schema.StringAttribute{Required: true},
+			"os":         schema.StringAttribute{Required: true},
+			"description": schema.StringAttribute{
+				Optional: true,
+				Computed: true,
+			},
+			"emoji": schema.StringAttribute{
+				Optional: true,
+				Computed: true,
+			},
+			"swap_size_mb": schema.Int64Attribute{
+				Optional: true,
+				Computed: true,
+			},
+			"builder_mode": schema.StringAttribute{
+				Optional: true,
+				Computed: true,
+			},
+			"access_level": schema.StringAttribute{
+				Optional: true,
+				Computed: true,
+			},
+			"experimental_features": schema.ListAttribute{
+				ElementType: types.StringType,
+				Optional:    true,
+				Computed:    true,
+			},
+			"instance_shape": schema.SingleNestedAttribute{
+				Optional: true,
+				Computed: true,
+				Attributes: map[string]schema.Attribute{
+					"virtual_cpu":      schema.Int64Attribute{Optional: true, Computed: true},
+					"memory_megabytes": schema.Int64Attribute{Optional: true, Computed: true},
+					"machine_arch":     schema.StringAttribute{Optional: true, Computed: true},
+					"os":               schema.StringAttribute{Optional: true, Computed: true},
+					"selectors": schema.ListNestedAttribute{
+						Optional: true,
+						Computed: true,
+						NestedObject: schema.NestedAttributeObject{
+							Attributes: map[string]schema.Attribute{
+								"name":  schema.StringAttribute{Required: true},
+								"value": schema.StringAttribute{Required: true},
+							},
+						},
+					},
+				},
+			},
+			"cache_volume_settings": schema.ListNestedAttribute{
+				Optional: true,
+				Computed: true,
+				NestedObject: schema.NestedAttributeObject{
+					Attributes: map[string]schema.Attribute{
+						"volume_tag":                   schema.StringAttribute{Required: true},
+						"volume_size_gb":               schema.Int64Attribute{Required: true},
+						"volume_reserved_size_gb":      schema.Int64Attribute{Optional: true, Computed: true},
+						"bundled_container_cache":      schema.BoolAttribute{Optional: true, Computed: true},
+						"bundled_buildkit_cache":       schema.BoolAttribute{Optional: true, Computed: true},
+						"bundled_git_mirror":           schema.BoolAttribute{Optional: true, Computed: true},
+						"bundled_runner_tools_cache":   schema.BoolAttribute{Optional: true, Computed: true},
+						"bundled_runner_actions_cache": schema.BoolAttribute{Optional: true, Computed: true},
+						"allow_commit_from_branch": schema.ListAttribute{
+							ElementType: types.StringType,
+							Optional:    true,
+							Computed:    true,
+						},
+					},
+				},
+			},
+			"custom_runner_image_spec": schema.SingleNestedAttribute{
+				Optional: true,
+				Attributes: map[string]schema.Attribute{
+					"ubuntu_spec": schema.SingleNestedAttribute{
+						Optional: true,
+						Attributes: map[string]schema.Attribute{
+							"apt_package": schema.ListAttribute{
+								ElementType: types.StringType,
+								Required:    true,
+							},
+						},
+					},
+					"docker_spec": schema.SingleNestedAttribute{
+						Optional: true,
+						Attributes: map[string]schema.Attribute{
+							"dockerfile_content": schema.StringAttribute{Required: true},
+						},
+					},
+				},
+			},
+			"network_policy": schema.SingleNestedAttribute{
+				Optional: true,
+				Computed: true,
+				Attributes: map[string]schema.Attribute{
+					"egress": schema.StringAttribute{Required: true},
+					"egress_domain_allow_list": schema.ListAttribute{
+						ElementType: types.StringType,
+						Optional:    true,
+						Computed:    true,
+					},
+					"advisory":          schema.BoolAttribute{Optional: true, Computed: true},
+					"egress_policy_tag": schema.StringAttribute{Optional: true, Computed: true},
+				},
+			},
+			"custom_runner_images": schema.ListNestedAttribute{
+				Computed: true,
+				NestedObject: schema.NestedAttributeObject{
+					Attributes: map[string]schema.Attribute{
+						"image_ref":        schema.StringAttribute{Computed: true},
+						"status":           schema.StringAttribute{Computed: true},
+						"last_build_error": schema.StringAttribute{Computed: true},
+						"started_build_at": schema.StringAttribute{Computed: true},
+						"built_at":         schema.StringAttribute{Computed: true},
+						"last_error_at":    schema.StringAttribute{Computed: true},
+						"build_ref":        schema.StringAttribute{Computed: true},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (r *runnerProfileResource) UpgradeState(ctx context.Context) map[int64]resource.StateUpgrader {
+	return map[int64]resource.StateUpgrader{
+		0: {
+			PriorSchema: runnerProfileSchemaV0(),
+			StateUpgrader: func(ctx context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
+				var priorState runnerProfileResourceModelV0
+				resp.Diagnostics.Append(req.State.Get(ctx, &priorState)...)
+				if resp.Diagnostics.HasError() {
+					return
+				}
+
+				var upgradedCVs types.List
+				switch {
+				case priorState.CacheVolumeSettings.IsNull():
+					upgradedCVs = types.ListNull(CacheVolumeSettingObjectType)
+				case priorState.CacheVolumeSettings.IsUnknown():
+					upgradedCVs = types.ListUnknown(CacheVolumeSettingObjectType)
+				default:
+					var priorCVs []cacheVolumeSettingModelV0
+					resp.Diagnostics.Append(priorState.CacheVolumeSettings.ElementsAs(ctx, &priorCVs, false)...)
+					if resp.Diagnostics.HasError() {
+						return
+					}
+
+					cvObjects := make([]attr.Value, 0, len(priorCVs))
+					for _, cv := range priorCVs {
+						cvObj, d := types.ObjectValue(CacheVolumeSettingAttrTypes, map[string]attr.Value{
+							"volume_size_gb":               cv.VolumeSizeGB,
+							"volume_reserved_size_gb":      cv.VolumeReservedSizeGB,
+							"bundled_container_cache":      cv.BundledContainerCache,
+							"bundled_buildkit_cache":       cv.BundledBuildkitCache,
+							"bundled_git_mirror":           cv.BundledGitMirror,
+							"bundled_runner_tools_cache":   cv.BundledRunnerToolsCache,
+							"bundled_runner_actions_cache": cv.BundledRunnerActionsCache,
+							"allow_commit_from_branch":     cv.AllowCommitFromBranch,
+						})
+						resp.Diagnostics.Append(d...)
+						if resp.Diagnostics.HasError() {
+							return
+						}
+						cvObjects = append(cvObjects, cvObj)
+					}
+
+					cvList, d := types.ListValue(CacheVolumeSettingObjectType, cvObjects)
+					resp.Diagnostics.Append(d...)
+					if resp.Diagnostics.HasError() {
+						return
+					}
+					upgradedCVs = cvList
+				}
+
+				upgradedState := RunnerProfileResourceModel{
+					ID:                    priorState.ID,
+					ProfileID:             priorState.ProfileID,
+					Version:               priorState.Version,
+					CreatedAt:             priorState.CreatedAt,
+					UpdatedAt:             priorState.UpdatedAt,
+					Tag:                   priorState.Tag,
+					Description:           priorState.Description,
+					OS:                    priorState.OS,
+					Emoji:                 priorState.Emoji,
+					SwapSizeMB:            priorState.SwapSizeMB,
+					BuilderMode:           priorState.BuilderMode,
+					AccessLevel:           priorState.AccessLevel,
+					CustomPermissions:     types.ListNull(CustomPermissionObjectType),
+					ExperimentalFeatures:  priorState.ExperimentalFeatures,
+					InstanceShape:         priorState.InstanceShape,
+					CacheVolumeSettings:   upgradedCVs,
+					CustomRunnerImageSpec: priorState.CustomRunnerImageSpec,
+					NetworkPolicy:         priorState.NetworkPolicy,
+					CustomRunnerImages:    priorState.CustomRunnerImages,
+				}
+
+				resp.Diagnostics.Append(resp.State.Set(ctx, &upgradedState)...)
+			},
+		},
+	}
 }

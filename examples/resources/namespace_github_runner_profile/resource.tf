@@ -35,7 +35,6 @@ resource "namespace_github_runner_profile" "high_perf_builder" {
 
   cache_volume_settings = [
     {
-      volume_tag                   = "build-cache"
       volume_size_gb               = 100
       volume_reserved_size_gb      = 10
       bundled_container_cache      = true

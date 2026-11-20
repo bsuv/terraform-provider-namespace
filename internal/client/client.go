@@ -16,13 +16,12 @@ import (
 	"buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/cloud/vault/v1beta/vaultv1betagrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"namespacelabs.dev/integrations/api"
 )
 
 // Client is the primary client bundle supplying initialized domain service clients.
 type Client struct {
 	pool        *EndpointPool
-	tokenSource api.TokenSource
+	tokenSource TokenSource
 }
 
 // Config specifies initialization settings for the Client.
@@ -33,7 +32,7 @@ type Config struct {
 	IAMEndpoint     string
 	ComputeEndpoint string
 	Version         string
-	TokenSource     api.TokenSource                  // Optional override
+	TokenSource     TokenSource                      // Optional override
 	DialOptions     []grpc.DialOption                // Optional override
 	Creds           credentials.TransportCredentials // Optional override (e.g. insecure for bufconn)
 }

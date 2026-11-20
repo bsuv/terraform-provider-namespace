@@ -94,7 +94,6 @@ resource "namespace_github_runner_profile" "empty_lists" {
 
   cache_volume_settings = [
     {
-      volume_tag               = "empty-branch-cache"
       volume_size_gb           = 25
       volume_reserved_size_gb  = 0
       allow_commit_from_branch = []
@@ -170,7 +169,6 @@ resource "namespace_github_runner_profile" "empty_lists" {
 
   cache_volume_settings = [
     {
-      volume_tag               = "empty-branch-cache"
       volume_size_gb           = 25
       volume_reserved_size_gb  = 0
       allow_commit_from_branch = ["main", "release"]
@@ -260,11 +258,11 @@ resource "namespace_tenant_group" "multi_pol" {
   policies = [
     {
       policy = "namespace.cloud.compute.v1beta.UsagePolicy"
-      value  = "{\"max_instances\": 20}"
+      value  = "{\"concurrency_limits\":{\"max_instance_count\":20}}"
     },
     {
-      policy = "namespace.cloud.iam.v1beta.SecurityPolicy"
-      value  = "{\"require_mfa\": true}"
+      policy = "namespace.cloud.compute.v1beta.UsagePolicy"
+      value  = "{\"usage_limits\":{\"builds\":100}}"
     }
   ]
 }

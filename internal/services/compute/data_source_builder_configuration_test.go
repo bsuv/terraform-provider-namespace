@@ -2,6 +2,7 @@ package compute_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	builderv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/builder/v1beta"
@@ -75,6 +76,12 @@ func TestBuilderConfigurationDataSource_Schema(t *testing.T) {
 	}
 	if len(strAttr.Validators) == 0 {
 		t.Error("expected validators on builder_name attribute")
+	}
+
+	shapeAttr := attrs["shape"].(schema.SingleNestedAttribute)
+	osAttr := shapeAttr.Attributes["os"].(schema.StringAttribute)
+	if !strings.Contains(strings.ToLower(osAttr.Description), "windows") {
+		t.Errorf("expected shape.os description to include 'windows', got %q", osAttr.Description)
 	}
 }
 
@@ -243,5 +250,50 @@ func TestBuilderConfigurationDataSource_Read_Error(t *testing.T) {
 	d.Read(ctx, req, resp)
 	if !resp.Diagnostics.HasError() {
 		t.Fatal("expected error diagnostic for permission denied")
+	}
+}
+
+func TestBuilderConfigurationDataSource_Read_WindowsPlatform(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	srv.Builder.GetBuilderConfigurationFunc = func(ctx context.Context, req *builderv1beta.GetBuilderConfigurationRequest) (*builderv1beta.GetBuilderConfigurationResponse, error) {
+		return &builderv1beta.GetBuilderConfigurationResponse{
+			BuildkitEndpoint:     "builder.namespace.so:443",
+			FullBuildkitEndpoint: "tcp://builder.namespace.so:443",
+			CacheSizeMb:          51200,
+			Shape: &computev1beta.InstanceShape{
+				VirtualCpu:      8,
+				MemoryMegabytes: 16384,
+				MachineArch:     "amd64",
+				Os:              "windows",
+			},
+		}, nil
+	}
+
+	d, schemaResp := setupTestDataSourceBuilderConfiguration(t, srv)
+	cfg := compute.BuilderConfigurationDataSourceModel{
+		ID:                   types.StringNull(),
+		Platform:             types.StringValue("windows/amd64"),
+		BuilderName:          types.StringNull(),
+		BuildkitEndpoint:     types.StringNull(),
+		FullBuildkitEndpoint: types.StringNull(),
+		ServerCaPem:          types.StringNull(),
+		CacheSizeMb:          types.Int64Null(),
+		Shape:                nil,
+	}
+	configState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = configState.Set(ctx, &cfg)
+
+	resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	d.Read(ctx, datasource.ReadRequest{Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: configState.Raw}}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected read diagnostics: %v", resp.Diagnostics)
+	}
+
+	var state compute.BuilderConfigurationDataSourceModel
+	_ = resp.State.Get(ctx, &state)
+	if state.Shape == nil || state.Shape.OS.ValueString() != "windows" {
+		t.Fatalf("expected Shape.OS 'windows', got %+v", state.Shape)
 	}
 }

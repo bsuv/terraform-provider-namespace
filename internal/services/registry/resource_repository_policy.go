@@ -10,7 +10,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -73,9 +72,6 @@ func (r *repositoryPolicyResource) Schema(ctx context.Context, req resource.Sche
 			"revision": schema.Int64Attribute{
 				Description: "Monotonic revision number used for optimistic concurrency locking.",
 				Computed:    true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.UseStateForUnknown(),
-				},
 			},
 			"expiration": schema.StringAttribute{
 				Description: "Repository-level container image expiration duration (e.g. '24h', '720h'). Must be at least 4h.",
@@ -126,7 +122,7 @@ func (v repositoryPolicyConfigValidator) ValidateResource(ctx context.Context, r
 
 	enf := config.ExpirationEnforcement.ValueString()
 	if enf == "EXPIRATION_ENFORCEMENT_ENFORCE" {
-		if config.Expiration.IsNull() || config.Expiration.IsUnknown() || config.Expiration.ValueString() == "" {
+		if config.Expiration.IsNull() || (!config.Expiration.IsUnknown() && config.Expiration.ValueString() == "") {
 			resp.Diagnostics.AddAttributeError(
 				path.Root("expiration"),
 				"Missing Required Expiration Duration",

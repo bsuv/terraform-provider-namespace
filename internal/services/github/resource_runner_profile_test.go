@@ -9,10 +9,14 @@ import (
 	githubv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/github/v1beta"
 	stdlib "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/stdlib"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -73,7 +77,6 @@ func sampleFullProfile(profileID string, version int64) *githubv1beta.RunnerProf
 			},
 			CacheVolumeSettings: []*githubv1beta.CacheVolumeSettings{
 				{
-					VolumeTag:                 "build-cache",
 					VolumeSizeGb:              100,
 					VolumeReservedSizeGb:      10,
 					BundledContainerCache:     true,
@@ -147,7 +150,6 @@ func sampleFullModel() github.RunnerProfileResourceModel {
 	})
 
 	cvObj, _ := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
-		"volume_tag":                   types.StringValue("build-cache"),
 		"volume_size_gb":               types.Int64Value(100),
 		"volume_reserved_size_gb":      types.Int64Value(10),
 		"bundled_container_cache":      types.BoolValue(true),
@@ -190,6 +192,7 @@ func sampleFullModel() github.RunnerProfileResourceModel {
 		SwapSizeMB:            types.Int64Value(2048),
 		BuilderMode:           types.StringValue("USE_REMOTE_BUILDER"),
 		AccessLevel:           types.StringValue("ACCESS_LEVEL_PERMISSIVE"),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  expList,
 		InstanceShape:         shapeObj,
 		CacheVolumeSettings:   cvList,
@@ -219,7 +222,7 @@ func TestRunnerProfileResource_Schema(t *testing.T) {
 	expectedAttrs := []string{
 		"id", "profile_id", "version", "created_at", "updated_at", "tag", "os",
 		"description", "emoji", "swap_size_mb", "builder_mode", "access_level",
-		"experimental_features", "instance_shape", "cache_volume_settings",
+		"custom_permissions", "experimental_features", "instance_shape", "cache_volume_settings",
 		"custom_runner_image_spec", "network_policy", "custom_runner_images",
 	}
 
@@ -227,6 +230,29 @@ func TestRunnerProfileResource_Schema(t *testing.T) {
 		if _, exists := attrs[name]; !exists {
 			t.Errorf("missing expected attribute %q in schema", name)
 		}
+	}
+
+	if schemaResp.Schema.Version != 1 {
+		t.Errorf("expected schema version 1, got %d", schemaResp.Schema.Version)
+	}
+	if _, ok := r.(resource.ResourceWithUpgradeState); !ok {
+		t.Error("expected runnerProfileResource to implement resource.ResourceWithUpgradeState")
+	}
+
+	cvAttr := attrs["cache_volume_settings"].(rschema.ListNestedAttribute)
+	if _, hasVolTag := cvAttr.NestedObject.Attributes["volume_tag"]; hasVolTag {
+		t.Error("cache_volume_settings schema must not contain removed attribute 'volume_tag'")
+	}
+
+	shapeAttr := attrs["instance_shape"].(rschema.SingleNestedAttribute)
+	osAttr := shapeAttr.Attributes["os"].(rschema.StringAttribute)
+	if !strings.Contains(strings.ToLower(osAttr.Description), "windows") {
+		t.Errorf("expected instance_shape.os description to include 'windows', got %q", osAttr.Description)
+	}
+
+	alAttr := attrs["access_level"].(rschema.StringAttribute)
+	if !strings.Contains(alAttr.Description, "ACCESS_LEVEL_CUSTOM") {
+		t.Errorf("expected access_level description to include 'ACCESS_LEVEL_CUSTOM', got %q", alAttr.Description)
 	}
 }
 
@@ -268,7 +294,6 @@ func TestRunnerProfileResource_ConfigValidators(t *testing.T) {
 	// 2. Invalid: volume_reserved_size_gb >= volume_size_gb
 	model = sampleFullModel()
 	badCVObj, _ := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
-		"volume_tag":                   types.StringValue("build-cache"),
 		"volume_size_gb":               types.Int64Value(50),
 		"volume_reserved_size_gb":      types.Int64Value(50),
 		"bundled_container_cache":      types.BoolValue(true),
@@ -455,6 +480,7 @@ func TestRunnerProfileResource_Create_WithUnknownNestedBlocks(t *testing.T) {
 		SwapSizeMB:            types.Int64Unknown(),
 		BuilderMode:           types.StringUnknown(),
 		AccessLevel:           types.StringUnknown(),
+		CustomPermissions:     types.ListUnknown(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  types.ListUnknown(types.StringType),
 		InstanceShape:         types.ObjectUnknown(github.InstanceShapeAttrTypes),
 		CacheVolumeSettings:   types.ListUnknown(github.CacheVolumeSettingObjectType),
@@ -857,7 +883,6 @@ func TestRunnerProfileResource_ListOrderPreservationAndDeterminism(t *testing.T)
 	})
 
 	cvObj, _ := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
-		"volume_tag":                   types.StringValue("cache-1"),
 		"volume_size_gb":               types.Int64Value(20),
 		"volume_reserved_size_gb":      types.Int64Value(0),
 		"bundled_container_cache":      types.BoolValue(false),
@@ -882,6 +907,7 @@ func TestRunnerProfileResource_ListOrderPreservationAndDeterminism(t *testing.T)
 		SwapSizeMB:            types.Int64Value(0),
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  expFeaturesList,
 		InstanceShape:         shapeObj,
 		CacheVolumeSettings:   cvList,
@@ -988,7 +1014,6 @@ func TestRunnerProfileResource_EmptyListsPreservation(t *testing.T) {
 	})
 
 	cvObj, _ := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
-		"volume_tag":                   types.StringValue("empty-branch-cv"),
 		"volume_size_gb":               types.Int64Value(50),
 		"volume_reserved_size_gb":      types.Int64Value(0),
 		"bundled_container_cache":      types.BoolValue(false),
@@ -1028,6 +1053,7 @@ func TestRunnerProfileResource_EmptyListsPreservation(t *testing.T) {
 		SwapSizeMB:            types.Int64Value(0),
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  emptyStrList,
 		InstanceShape:         shapeObj,
 		CacheVolumeSettings:   cvList,
@@ -1093,5 +1119,659 @@ func TestRunnerProfileResource_EmptyListsPreservation(t *testing.T) {
 		t.Errorf("expected egress_domain_allow_list to be non-null empty list")
 	} else if len(npRes.EgressDomainAllowList.Elements()) != 0 {
 		t.Errorf("expected egress_domain_allow_list count 0, got %d", len(npRes.EgressDomainAllowList.Elements()))
+	}
+}
+
+func TestRunnerProfileResource_UpgradeState_V0ToV1(t *testing.T) {
+	ctx := context.Background()
+	r := github.NewRunnerProfileResource()
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	if schemaResp.Diagnostics.HasError() {
+		t.Fatalf("unexpected schema errors: %v", schemaResp.Diagnostics)
+	}
+
+	upgR, ok := r.(resource.ResourceWithUpgradeState)
+	if !ok {
+		t.Fatal("expected resource to implement ResourceWithUpgradeState")
+	}
+	upgraders := upgR.UpgradeState(ctx)
+	upgrader, exists := upgraders[0]
+	if !exists || upgrader.PriorSchema == nil {
+		t.Fatal("expected version 0 StateUpgrader with non-nil PriorSchema")
+	}
+
+	priorType := upgrader.PriorSchema.Type().TerraformType(ctx)
+
+	upgradeJSON := func(t *testing.T, rawJSON string) github.RunnerProfileResourceModel {
+		t.Helper()
+		rawVal, err := (&tfprotov6.RawState{JSON: []byte(rawJSON)}).Unmarshal(priorType)
+		if err != nil {
+			t.Fatalf("RawState.Unmarshal failed: %v", err)
+		}
+		req := resource.UpgradeStateRequest{
+			State: &tfsdk.State{
+				Schema: *upgrader.PriorSchema,
+				Raw:    rawVal,
+			},
+		}
+		resp := &resource.UpgradeStateResponse{
+			State: tfsdk.State{Schema: schemaResp.Schema},
+		}
+		upgrader.StateUpgrader(ctx, req, resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("UpgradeState returned errors: %v", resp.Diagnostics)
+		}
+		var out github.RunnerProfileResourceModel
+		diags := resp.State.Get(ctx, &out)
+		if diags.HasError() {
+			t.Fatalf("failed to decode upgraded v1 state: %v", diags)
+		}
+		return out
+	}
+
+	t.Run("populated multi-item cache_volume_settings strips volume_tag and preserves fields", func(t *testing.T) {
+		v0JSON := `{
+			"id": "prof_v0_1",
+			"profile_id": "prof_v0_1",
+			"version": 3,
+			"created_at": "2026-08-22T10:00:00Z",
+			"updated_at": "2026-08-22T11:00:00Z",
+			"tag": "legacy-runner",
+			"os": "ubuntu-24.04",
+			"description": "Legacy v0 profile",
+			"emoji": "🚀",
+			"swap_size_mb": 2048,
+			"builder_mode": "USE_REMOTE_BUILDER",
+			"access_level": "ACCESS_LEVEL_PERMISSIVE",
+			"experimental_features": ["nested-virt"],
+			"instance_shape": {
+				"virtual_cpu": 4,
+				"memory_megabytes": 8192,
+				"machine_arch": "amd64",
+				"os": "linux",
+				"selectors": [{"name": "tier", "value": "fast"}]
+			},
+			"cache_volume_settings": [
+				{
+					"volume_tag": "vol-a",
+					"volume_size_gb": 100,
+					"volume_reserved_size_gb": 10,
+					"bundled_container_cache": true,
+					"bundled_buildkit_cache": true,
+					"bundled_git_mirror": true,
+					"bundled_runner_tools_cache": true,
+					"bundled_runner_actions_cache": true,
+					"allow_commit_from_branch": ["main", "release/*"]
+				},
+				{
+					"volume_tag": "vol-b",
+					"volume_size_gb": 50,
+					"volume_reserved_size_gb": 5,
+					"bundled_container_cache": false,
+					"bundled_buildkit_cache": false,
+					"bundled_git_mirror": false,
+					"bundled_runner_tools_cache": false,
+					"bundled_runner_actions_cache": false,
+					"allow_commit_from_branch": []
+				},
+				{
+					"volume_tag": "vol-c",
+					"volume_size_gb": 25,
+					"volume_reserved_size_gb": 0,
+					"bundled_container_cache": false,
+					"bundled_buildkit_cache": false,
+					"bundled_git_mirror": false,
+					"bundled_runner_tools_cache": false,
+					"bundled_runner_actions_cache": false,
+					"allow_commit_from_branch": null
+				}
+			],
+			"custom_runner_image_spec": null,
+			"network_policy": null,
+			"custom_runner_images": null
+		}`
+
+		out := upgradeJSON(t, v0JSON)
+		if out.ID.ValueString() != "prof_v0_1" || out.Version.ValueInt64() != 3 || out.Tag.ValueString() != "legacy-runner" {
+			t.Fatalf("unexpected top-level upgraded fields: id=%q version=%d tag=%q", out.ID.ValueString(), out.Version.ValueInt64(), out.Tag.ValueString())
+		}
+		if !out.CustomPermissions.IsNull() {
+			t.Errorf("expected custom_permissions to be null after v0->v1 upgrade, got %v", out.CustomPermissions)
+		}
+		if out.CacheVolumeSettings.IsNull() || out.CacheVolumeSettings.IsUnknown() {
+			t.Fatal("expected populated cache_volume_settings")
+		}
+		var cvs []github.CacheVolumeSettingModel
+		if d := out.CacheVolumeSettings.ElementsAs(ctx, &cvs, false); d.HasError() {
+			t.Fatalf("failed to decode upgraded cache_volume_settings: %v", d)
+		}
+		if len(cvs) != 3 {
+			t.Fatalf("expected 3 cache_volume_settings items, got %d", len(cvs))
+		}
+		if cvs[0].VolumeSizeGB.ValueInt64() != 100 || !cvs[0].BundledContainerCache.ValueBool() {
+			t.Errorf("item 0 fields mismatch: %+v", cvs[0])
+		}
+		var b0 []string
+		_ = cvs[0].AllowCommitFromBranch.ElementsAs(ctx, &b0, false)
+		if len(b0) != 2 || b0[0] != "main" || b0[1] != "release/*" {
+			t.Errorf("item 0 branches mismatch: %v", b0)
+		}
+		if cvs[1].VolumeReservedSizeGB.ValueInt64() != 5 || cvs[1].AllowCommitFromBranch.IsNull() || len(cvs[1].AllowCommitFromBranch.Elements()) != 0 {
+			t.Errorf("item 1 expected reserved=5 and empty non-null branches, got %+v", cvs[1])
+		}
+		if cvs[2].VolumeSizeGB.ValueInt64() != 25 || !cvs[2].AllowCommitFromBranch.IsNull() {
+			t.Errorf("item 2 expected size=25 and null branches, got %+v", cvs[2])
+		}
+	})
+
+	t.Run("cache_volume_settings null", func(t *testing.T) {
+		v0JSON := `{
+			"id": "prof_v0_null",
+			"profile_id": "prof_v0_null",
+			"version": 1,
+			"created_at": "2026-08-22T10:00:00Z",
+			"updated_at": "2026-08-22T10:00:00Z",
+			"tag": "null-cv",
+			"os": "ubuntu-24.04",
+			"description": null,
+			"emoji": null,
+			"swap_size_mb": null,
+			"builder_mode": null,
+			"access_level": null,
+			"experimental_features": null,
+			"instance_shape": null,
+			"cache_volume_settings": null,
+			"custom_runner_image_spec": null,
+			"network_policy": null,
+			"custom_runner_images": null
+		}`
+		out := upgradeJSON(t, v0JSON)
+		if !out.CacheVolumeSettings.IsNull() {
+			t.Errorf("expected null cache_volume_settings to remain null, got %v", out.CacheVolumeSettings)
+		}
+		if !out.CustomPermissions.IsNull() {
+			t.Errorf("expected custom_permissions to be null, got %v", out.CustomPermissions)
+		}
+	})
+
+	t.Run("cache_volume_settings explicit empty list", func(t *testing.T) {
+		v0JSON := `{
+			"id": "prof_v0_empty",
+			"profile_id": "prof_v0_empty",
+			"version": 1,
+			"created_at": "2026-08-22T10:00:00Z",
+			"updated_at": "2026-08-22T10:00:00Z",
+			"tag": "empty-cv",
+			"os": "ubuntu-24.04",
+			"description": null,
+			"emoji": null,
+			"swap_size_mb": 0,
+			"builder_mode": null,
+			"access_level": null,
+			"experimental_features": null,
+			"instance_shape": null,
+			"cache_volume_settings": [],
+			"custom_runner_image_spec": null,
+			"network_policy": null,
+			"custom_runner_images": null
+		}`
+		out := upgradeJSON(t, v0JSON)
+		if out.CacheVolumeSettings.IsNull() || len(out.CacheVolumeSettings.Elements()) != 0 {
+			t.Errorf("expected empty non-null cache_volume_settings list, got %v", out.CacheVolumeSettings)
+		}
+	})
+}
+
+func TestRunnerProfileResource_PositionalCacheVolumeBranchReconciliation(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	// Server simulates protobuf wire behavior: omits empty AllowCommitFromBranch (nil)
+	var stored *githubv1beta.RunnerProfileWithStatus
+	srv.Profile.CreateProfileFunc = func(ctx context.Context, req *githubv1beta.CreateProfileRequest) (*githubv1beta.CreateProfileResponse, error) {
+		now := timestamppb.Now()
+		var serverCVs []*githubv1beta.CacheVolumeSettings
+		for _, cv := range req.GetSpec().GetCacheVolumeSettings() {
+			var branches []string
+			if len(cv.GetAllowCommitFromBranch()) > 0 {
+				branches = append([]string(nil), cv.GetAllowCommitFromBranch()...)
+			}
+			serverCVs = append(serverCVs, &githubv1beta.CacheVolumeSettings{
+				VolumeSizeGb:          cv.GetVolumeSizeGb(),
+				VolumeReservedSizeGb:  cv.GetVolumeReservedSizeGb(),
+				AllowCommitFromBranch: branches,
+			})
+		}
+		stored = &githubv1beta.RunnerProfileWithStatus{
+			ProfileId: "prof_pos_cv",
+			Version:   1,
+			CreatedAt: now,
+			UpdatedAt: now,
+			Spec: &githubv1beta.RunnerProfileSpec{
+				Tag:                 req.GetSpec().GetTag(),
+				Os:                  req.GetSpec().GetOs(),
+				CacheVolumeSettings: serverCVs,
+			},
+		}
+		return &githubv1beta.CreateProfileResponse{Profile: stored}, nil
+	}
+	srv.Profile.ListProfilesFunc = func(ctx context.Context, req *emptypb.Empty) (*githubv1beta.ListProfilesResponse, error) {
+		return &githubv1beta.ListProfilesResponse{Profiles: []*githubv1beta.RunnerProfileWithStatus{stored}}, nil
+	}
+
+	r, schemaResp := setupTestResource(t, srv)
+
+	makeCV := func(size int64, branches types.List) attr.Value {
+		obj, _ := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
+			"volume_size_gb":               types.Int64Value(size),
+			"volume_reserved_size_gb":      types.Int64Value(0),
+			"bundled_container_cache":      types.BoolValue(false),
+			"bundled_buildkit_cache":       types.BoolValue(false),
+			"bundled_git_mirror":           types.BoolValue(false),
+			"bundled_runner_tools_cache":   types.BoolValue(false),
+			"bundled_runner_actions_cache": types.BoolValue(false),
+			"allow_commit_from_branch":     branches,
+		})
+		return obj
+	}
+
+	emptyBranches, _ := types.ListValue(types.StringType, []attr.Value{})
+	mainBranches, _ := types.ListValue(types.StringType, []attr.Value{types.StringValue("main")})
+
+	cvList, _ := types.ListValue(github.CacheVolumeSettingObjectType, []attr.Value{
+		makeCV(10, emptyBranches),
+		makeCV(20, types.ListNull(types.StringType)),
+		makeCV(30, mainBranches),
+	})
+
+	planModel := github.RunnerProfileResourceModel{
+		ID:                    types.StringUnknown(),
+		ProfileID:             types.StringUnknown(),
+		Version:               types.Int64Unknown(),
+		CreatedAt:             types.StringUnknown(),
+		UpdatedAt:             types.StringUnknown(),
+		Tag:                   types.StringValue("pos-cv"),
+		OS:                    types.StringValue("ubuntu-24.04"),
+		Description:           types.StringNull(),
+		Emoji:                 types.StringNull(),
+		SwapSizeMB:            types.Int64Value(0),
+		BuilderMode:           types.StringNull(),
+		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
+		ExperimentalFeatures:  types.ListNull(types.StringType),
+		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
+		CacheVolumeSettings:   cvList,
+		CustomRunnerImageSpec: types.ObjectNull(github.CustomRunnerImageSpecAttrTypes),
+		NetworkPolicy:         types.ObjectNull(github.NetworkPolicyAttrTypes),
+		CustomRunnerImages:    types.ListNull(github.CustomRunnerImageStatusObjectType),
+	}
+
+	planState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = planState.Set(ctx, &planModel)
+
+	createResp := &resource.CreateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: schemaResp.Schema, Raw: planState.Raw}}, createResp)
+	if createResp.Diagnostics.HasError() {
+		t.Fatalf("Create failed: %v", createResp.Diagnostics)
+	}
+
+	var got github.RunnerProfileResourceModel
+	_ = createResp.State.Get(ctx, &got)
+	var gotCVs []github.CacheVolumeSettingModel
+	_ = got.CacheVolumeSettings.ElementsAs(ctx, &gotCVs, false)
+	if len(gotCVs) != 3 {
+		t.Fatalf("expected 3 cache volumes, got %d", len(gotCVs))
+	}
+	if gotCVs[0].AllowCommitFromBranch.IsNull() || len(gotCVs[0].AllowCommitFromBranch.Elements()) != 0 {
+		t.Errorf("index 0 expected empty non-null list, got %v", gotCVs[0].AllowCommitFromBranch)
+	}
+	if !gotCVs[1].AllowCommitFromBranch.IsNull() {
+		t.Errorf("index 1 expected null list, got %v", gotCVs[1].AllowCommitFromBranch)
+	}
+	if len(gotCVs[2].AllowCommitFromBranch.Elements()) != 1 {
+		t.Errorf("index 2 expected 1 element, got %v", gotCVs[2].AllowCommitFromBranch)
+	}
+
+	// Simulate remote out-of-band addition of a 4th item (i >= len(plannedCVModels)) -> no panic, empty flattens to null
+	stored.Spec.CacheVolumeSettings = append(stored.Spec.CacheVolumeSettings, &githubv1beta.CacheVolumeSettings{
+		VolumeSizeGb:          40,
+		AllowCommitFromBranch: nil,
+	})
+	readResp := &resource.ReadResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.Read(ctx, resource.ReadRequest{State: createResp.State}, readResp)
+	if readResp.Diagnostics.HasError() {
+		t.Fatalf("Read failed: %v", readResp.Diagnostics)
+	}
+	var readGot github.RunnerProfileResourceModel
+	_ = readResp.State.Get(ctx, &readGot)
+	var readCVs []github.CacheVolumeSettingModel
+	_ = readGot.CacheVolumeSettings.ElementsAs(ctx, &readCVs, false)
+	if len(readCVs) != 4 {
+		t.Fatalf("expected 4 cache volumes after remote addition, got %d", len(readCVs))
+	}
+	if !readCVs[3].AllowCommitFromBranch.IsNull() {
+		t.Errorf("index 3 (beyond plannedCVModels) expected null branches, got %v", readCVs[3].AllowCommitFromBranch)
+	}
+}
+
+func TestRunnerProfileResource_AccessLevelCustom_And_CustomPermissions(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+	srv.Profile.EnableStatefulProfiles()
+
+	var capturedCreateReq *githubv1beta.CreateProfileRequest
+	origCreate := srv.Profile.CreateProfileFunc
+	srv.Profile.CreateProfileFunc = func(ctx context.Context, req *githubv1beta.CreateProfileRequest) (*githubv1beta.CreateProfileResponse, error) {
+		capturedCreateReq = req
+		return origCreate(ctx, req)
+	}
+
+	r, schemaResp := setupTestResource(t, srv)
+
+	actionsRead, _ := types.ListValue(types.StringType, []attr.Value{types.StringValue("read"), types.StringValue("list")})
+	actionsEmpty, _ := types.ListValue(types.StringType, []attr.Value{})
+	cp1, _ := types.ObjectValue(github.CustomPermissionAttrTypes, map[string]attr.Value{
+		"resource_type": types.StringValue("vault/object"),
+		"resource_id":   types.StringValue("secret-1"),
+		"actions":       actionsRead,
+	})
+	cp2, _ := types.ObjectValue(github.CustomPermissionAttrTypes, map[string]attr.Value{
+		"resource_type": types.StringValue("cache/bazel"),
+		"resource_id":   types.StringValue(""),
+		"actions":       actionsEmpty,
+	})
+	cpList, _ := types.ListValue(github.CustomPermissionObjectType, []attr.Value{cp1, cp2})
+
+	planModel := github.RunnerProfileResourceModel{
+		ID:                    types.StringUnknown(),
+		ProfileID:             types.StringUnknown(),
+		Version:               types.Int64Unknown(),
+		CreatedAt:             types.StringUnknown(),
+		UpdatedAt:             types.StringUnknown(),
+		Tag:                   types.StringValue("custom-access"),
+		OS:                    types.StringValue("ubuntu-24.04"),
+		Description:           types.StringNull(),
+		Emoji:                 types.StringNull(),
+		SwapSizeMB:            types.Int64Value(0),
+		BuilderMode:           types.StringNull(),
+		AccessLevel:           types.StringValue("ACCESS_LEVEL_CUSTOM"),
+		CustomPermissions:     cpList,
+		ExperimentalFeatures:  types.ListNull(types.StringType),
+		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
+		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
+		CustomRunnerImageSpec: types.ObjectNull(github.CustomRunnerImageSpecAttrTypes),
+		NetworkPolicy:         types.ObjectNull(github.NetworkPolicyAttrTypes),
+		CustomRunnerImages:    types.ListNull(github.CustomRunnerImageStatusObjectType),
+	}
+
+	planState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = planState.Set(ctx, &planModel)
+
+	createResp := &resource.CreateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: schemaResp.Schema, Raw: planState.Raw}}, createResp)
+	if createResp.Diagnostics.HasError() {
+		t.Fatalf("Create failed: %v", createResp.Diagnostics)
+	}
+
+	if capturedCreateReq.GetSpec().GetAccessLevel() != githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM {
+		t.Fatalf("expected ACCESS_LEVEL_CUSTOM, got %v", capturedCreateReq.GetSpec().GetAccessLevel())
+	}
+	if len(capturedCreateReq.GetSpec().GetCustomPermissions()) != 2 {
+		t.Fatalf("expected 2 custom permissions, got %d", len(capturedCreateReq.GetSpec().GetCustomPermissions()))
+	}
+	if capturedCreateReq.GetSpec().GetCustomPermissions()[1].GetResourceId() != "" {
+		t.Errorf("expected empty resource_id for second permission, got %q", capturedCreateReq.GetSpec().GetCustomPermissions()[1].GetResourceId())
+	}
+
+	// Verify state preserves actions = [] on item 2
+	var stateAfterCreate github.RunnerProfileResourceModel
+	_ = createResp.State.Get(ctx, &stateAfterCreate)
+	var stateCPs []github.CustomPermissionModel
+	_ = stateAfterCreate.CustomPermissions.ElementsAs(ctx, &stateCPs, false)
+	if len(stateCPs) != 2 {
+		t.Fatalf("expected 2 custom permissions in state, got %d", len(stateCPs))
+	}
+	if stateCPs[1].Actions.IsNull() || len(stateCPs[1].Actions.Elements()) != 0 {
+		t.Errorf("expected non-null empty actions list on item 2, got %v", stateCPs[1].Actions)
+	}
+
+	// Update to ACCESS_LEVEL_RESTRICTED with null custom_permissions
+	updateModel := stateAfterCreate
+	updateModel.AccessLevel = types.StringValue("ACCESS_LEVEL_RESTRICTED")
+	updateModel.CustomPermissions = types.ListNull(github.CustomPermissionObjectType)
+	updatePlanState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = updatePlanState.Set(ctx, &updateModel)
+
+	updateResp := &resource.UpdateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.Update(ctx, resource.UpdateRequest{
+		State: createResp.State,
+		Plan:  tfsdk.Plan{Schema: schemaResp.Schema, Raw: updatePlanState.Raw},
+	}, updateResp)
+	if updateResp.Diagnostics.HasError() {
+		t.Fatalf("Update failed: %v", updateResp.Diagnostics)
+	}
+	var stateAfterUpdate github.RunnerProfileResourceModel
+	_ = updateResp.State.Get(ctx, &stateAfterUpdate)
+	if stateAfterUpdate.AccessLevel.ValueString() != "ACCESS_LEVEL_RESTRICTED" || !stateAfterUpdate.CustomPermissions.IsNull() {
+		t.Errorf("expected ACCESS_LEVEL_RESTRICTED and null custom_permissions, got %q / %v", stateAfterUpdate.AccessLevel.ValueString(), stateAfterUpdate.CustomPermissions)
+	}
+
+	// Explicit empty custom_permissions = [] preserved vs null
+	emptyCPList, _ := types.ListValue(github.CustomPermissionObjectType, []attr.Value{})
+	emptyPlan := stateAfterUpdate
+	emptyPlan.AccessLevel = types.StringValue("ACCESS_LEVEL_CUSTOM")
+	emptyPlan.CustomPermissions = emptyCPList
+	emptyPlanState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = emptyPlanState.Set(ctx, &emptyPlan)
+	emptyResp := &resource.UpdateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.Update(ctx, resource.UpdateRequest{
+		State: updateResp.State,
+		Plan:  tfsdk.Plan{Schema: schemaResp.Schema, Raw: emptyPlanState.Raw},
+	}, emptyResp)
+	if emptyResp.Diagnostics.HasError() {
+		t.Fatalf("Update with empty custom_permissions=[] failed: %v", emptyResp.Diagnostics)
+	}
+	var stateAfterEmpty github.RunnerProfileResourceModel
+	_ = emptyResp.State.Get(ctx, &stateAfterEmpty)
+	if stateAfterEmpty.CustomPermissions.IsNull() || len(stateAfterEmpty.CustomPermissions.Elements()) != 0 {
+		t.Errorf("expected explicit empty custom_permissions=[], got %v", stateAfterEmpty.CustomPermissions)
+	}
+
+	// Schema validator rejects empty resource_type
+	cpAttr := schemaResp.Schema.Attributes["custom_permissions"].(rschema.ListNestedAttribute)
+	rtAttr := cpAttr.NestedObject.Attributes["resource_type"].(rschema.StringAttribute)
+	vResp := validator.StringResponse{}
+	for _, v := range rtAttr.Validators {
+		v.ValidateString(ctx, validator.StringRequest{
+			Path:        path.Root("custom_permissions").AtListIndex(0).AtName("resource_type"),
+			ConfigValue: types.StringValue(""),
+		}, &vResp)
+	}
+	if !vResp.Diagnostics.HasError() {
+		t.Error("expected validator error for empty custom_permissions.resource_type")
+	}
+}
+
+func TestRunnerProfileResource_AccessLevelNumeric4AndUnknown(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	var capturedSpec *githubv1beta.RunnerProfileSpec
+	srv.Profile.CreateProfileFunc = func(ctx context.Context, req *githubv1beta.CreateProfileRequest) (*githubv1beta.CreateProfileResponse, error) {
+		capturedSpec = req.GetSpec()
+		now := timestamppb.Now()
+		return &githubv1beta.CreateProfileResponse{
+			Profile: &githubv1beta.RunnerProfileWithStatus{
+				ProfileId: "prof_al_4",
+				Version:   1,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Spec:      req.GetSpec(),
+			},
+		}, nil
+	}
+
+	r, schemaResp := setupTestResource(t, srv)
+
+	baseModel := github.RunnerProfileResourceModel{
+		ID:                    types.StringUnknown(),
+		ProfileID:             types.StringUnknown(),
+		Version:               types.Int64Unknown(),
+		CreatedAt:             types.StringUnknown(),
+		UpdatedAt:             types.StringUnknown(),
+		Tag:                   types.StringValue("al-4"),
+		OS:                    types.StringValue("ubuntu-24.04"),
+		Description:           types.StringNull(),
+		Emoji:                 types.StringNull(),
+		SwapSizeMB:            types.Int64Value(0),
+		BuilderMode:           types.StringNull(),
+		AccessLevel:           types.StringValue("4"),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
+		ExperimentalFeatures:  types.ListNull(types.StringType),
+		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
+		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
+		CustomRunnerImageSpec: types.ObjectNull(github.CustomRunnerImageSpecAttrTypes),
+		NetworkPolicy:         types.ObjectNull(github.NetworkPolicyAttrTypes),
+		CustomRunnerImages:    types.ListNull(github.CustomRunnerImageStatusObjectType),
+	}
+
+	// "4" maps to ACCESS_LEVEL_CUSTOM, never ACCESS_LEVEL_UNSPECIFIED
+	planState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = planState.Set(ctx, &baseModel)
+	createResp := &resource.CreateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: schemaResp.Schema, Raw: planState.Raw}}, createResp)
+	if createResp.Diagnostics.HasError() {
+		t.Fatalf("Create with '4' failed: %v", createResp.Diagnostics)
+	}
+	if capturedSpec.GetAccessLevel() != githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM {
+		t.Fatalf("expected AccessLevel_ACCESS_LEVEL_CUSTOM for '4', got %v", capturedSpec.GetAccessLevel())
+	}
+	var stateOut github.RunnerProfileResourceModel
+	_ = createResp.State.Get(ctx, &stateOut)
+	if stateOut.AccessLevel.ValueString() != "ACCESS_LEVEL_CUSTOM" {
+		t.Errorf("expected state AccessLevel 'ACCESS_LEVEL_CUSTOM', got %q", stateOut.AccessLevel.ValueString())
+	}
+
+	// Unrecognized value returns attribute error instead of downgrading to ACCESS_LEVEL_UNSPECIFIED
+	badModel := baseModel
+	badModel.AccessLevel = types.StringValue("ACCESS_LEVEL_BOGUS")
+	badPlanState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = badPlanState.Set(ctx, &badModel)
+	badResp := &resource.CreateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: schemaResp.Schema, Raw: badPlanState.Raw}}, badResp)
+	if !badResp.Diagnostics.HasError() {
+		t.Fatal("expected error diagnostic for unrecognized access_level value")
+	}
+
+	// Unknown server enum 99 is preserved as "99", NOT mapped to ACCESS_LEVEL_CUSTOM or UNSPECIFIED
+	srv.Profile.ListProfilesFunc = func(ctx context.Context, req *emptypb.Empty) (*githubv1beta.ListProfilesResponse, error) {
+		return &githubv1beta.ListProfilesResponse{
+			Profiles: []*githubv1beta.RunnerProfileWithStatus{
+				{
+					ProfileId: "prof_unknown_enum",
+					Version:   1,
+					Spec: &githubv1beta.RunnerProfileSpec{
+						Tag:         "unknown-enum",
+						Os:          "ubuntu-24.04",
+						AccessLevel: githubv1beta.AccessLevel(99),
+					},
+				},
+			},
+		}, nil
+	}
+	impResp := &resource.ImportStateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.(resource.ResourceWithImportState).ImportState(ctx, resource.ImportStateRequest{ID: "prof_unknown_enum"}, impResp)
+	if impResp.Diagnostics.HasError() {
+		t.Fatalf("ImportState failed: %v", impResp.Diagnostics)
+	}
+	var impModel github.RunnerProfileResourceModel
+	_ = impResp.State.Get(ctx, &impModel)
+	if impModel.AccessLevel.ValueString() != "99" {
+		t.Errorf("expected unknown enum 99 to flatten as '99', got %q", impModel.AccessLevel.ValueString())
+	}
+}
+
+func TestRunnerProfileResource_InstanceShapeOS_Windows(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+	srv.Profile.EnableStatefulProfiles()
+
+	r, schemaResp := setupTestResource(t, srv)
+
+	shapeAttr := schemaResp.Schema.Attributes["instance_shape"].(rschema.SingleNestedAttribute)
+	osAttr := shapeAttr.Attributes["os"].(rschema.StringAttribute)
+
+	for _, validOS := range []string{"linux", "macos", "windows", ""} {
+		vResp := validator.StringResponse{}
+		for _, v := range osAttr.Validators {
+			v.ValidateString(ctx, validator.StringRequest{
+				Path:        path.Root("instance_shape").AtName("os"),
+				ConfigValue: types.StringValue(validOS),
+			}, &vResp)
+		}
+		if vResp.Diagnostics.HasError() {
+			t.Errorf("expected OS %q to be valid, got errors: %v", validOS, vResp.Diagnostics)
+		}
+	}
+
+	for _, invalidOS := range []string{"freebsd", "Windows"} {
+		vResp := validator.StringResponse{}
+		for _, v := range osAttr.Validators {
+			v.ValidateString(ctx, validator.StringRequest{
+				Path:        path.Root("instance_shape").AtName("os"),
+				ConfigValue: types.StringValue(invalidOS),
+			}, &vResp)
+		}
+		if !vResp.Diagnostics.HasError() {
+			t.Errorf("expected OS %q to be rejected by validator", invalidOS)
+		}
+	}
+
+	winShapeObj, _ := types.ObjectValue(github.InstanceShapeAttrTypes, map[string]attr.Value{
+		"virtual_cpu":      types.Int64Value(4),
+		"memory_megabytes": types.Int64Value(8192),
+		"machine_arch":     types.StringValue("amd64"),
+		"os":               types.StringValue("windows"),
+		"selectors":        types.ListNull(github.LabelObjectType),
+	})
+
+	planModel := github.RunnerProfileResourceModel{
+		ID:                    types.StringUnknown(),
+		ProfileID:             types.StringUnknown(),
+		Version:               types.Int64Unknown(),
+		CreatedAt:             types.StringUnknown(),
+		UpdatedAt:             types.StringUnknown(),
+		Tag:                   types.StringValue("win-runner"),
+		OS:                    types.StringValue("windows-2022"),
+		Description:           types.StringNull(),
+		Emoji:                 types.StringNull(),
+		SwapSizeMB:            types.Int64Value(0),
+		BuilderMode:           types.StringNull(),
+		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
+		ExperimentalFeatures:  types.ListNull(types.StringType),
+		InstanceShape:         winShapeObj,
+		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
+		CustomRunnerImageSpec: types.ObjectNull(github.CustomRunnerImageSpecAttrTypes),
+		NetworkPolicy:         types.ObjectNull(github.NetworkPolicyAttrTypes),
+		CustomRunnerImages:    types.ListNull(github.CustomRunnerImageStatusObjectType),
+	}
+
+	planState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = planState.Set(ctx, &planModel)
+	createResp := &resource.CreateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: schemaResp.Schema, Raw: planState.Raw}}, createResp)
+	if createResp.Diagnostics.HasError() {
+		t.Fatalf("Create Windows runner profile failed: %v", createResp.Diagnostics)
+	}
+
+	var got github.RunnerProfileResourceModel
+	_ = createResp.State.Get(ctx, &got)
+	var gotShape github.InstanceShapeModel
+	_ = got.InstanceShape.As(ctx, &gotShape, basetypes.ObjectAsOptions{})
+	if gotShape.OS.ValueString() != "windows" {
+		t.Errorf("expected instance_shape.os 'windows', got %q", gotShape.OS.ValueString())
 	}
 }

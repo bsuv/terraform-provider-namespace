@@ -41,10 +41,11 @@ output "all_profile_tags" {
 
 Read-Only:
 
-- `access_level` (String) Controls which Namespace features the runner workload can access (`ACCESS_LEVEL_UNSPECIFIED`, `ACCESS_LEVEL_PERMISSIVE`, `ACCESS_LEVEL_LIMITED`, `ACCESS_LEVEL_RESTRICTED`).
+- `access_level` (String) Controls which Namespace features the runner workload can access (`ACCESS_LEVEL_UNSPECIFIED`, `ACCESS_LEVEL_PERMISSIVE`, `ACCESS_LEVEL_LIMITED`, `ACCESS_LEVEL_RESTRICTED`, `ACCESS_LEVEL_CUSTOM`).
 - `builder_mode` (String) Build execution caching mode (`BUILDER_MODE_UNSPECIFIED`, `USE_REMOTE_BUILDER`, `USE_LOCAL_CACHE`, `NO_CACHING`).
 - `cache_volume_settings` (Attributes List) Persistent cache volume attachments for this runner profile. (see [below for nested schema](#nestedatt--profiles--cache_volume_settings))
 - `created_at` (String) RFC3339Nano creation timestamp.
+- `custom_permissions` (Attributes List) Granular IAM permission grants when `access_level` is `ACCESS_LEVEL_CUSTOM`. (see [below for nested schema](#nestedatt--profiles--custom_permissions))
 - `custom_runner_image_spec` (Attributes) Custom runner image specification (Ubuntu APT packages and/or inline Dockerfile). (see [below for nested schema](#nestedatt--profiles--custom_runner_image_spec))
 - `custom_runner_images` (Attributes List) List of custom runner image build statuses. (see [below for nested schema](#nestedatt--profiles--custom_runner_images))
 - `description` (String) Human-friendly description of the runner profile.
@@ -73,7 +74,16 @@ Read-Only:
 - `bundled_runner_tools_cache` (Boolean) Whether to bundle runner tool cache in this volume.
 - `volume_reserved_size_gb` (Number) Reserved size that cannot be used by the cache, in gigabytes.
 - `volume_size_gb` (Number) Total size of the cache volume in gigabytes.
-- `volume_tag` (String) Unique identifier for this cache volume within the profile.
+
+
+<a id="nestedatt--profiles--custom_permissions"></a>
+### Nested Schema for `profiles.custom_permissions`
+
+Read-Only:
+
+- `actions` (List of String) List of allowed action strings.
+- `resource_id` (String) Target resource identifier, or empty string `""` for all resources of this type.
+- `resource_type` (String) Resource type identifier (e.g. `vault/object`, `cache/bazel`).
 
 
 <a id="nestedatt--profiles--custom_runner_image_spec"></a>
@@ -122,7 +132,7 @@ Read-Only:
 
 - `machine_arch` (String) Architecture of the instance (`amd64`, `arm64`).
 - `memory_megabytes` (Number) Memory in megabytes.
-- `os` (String) Compute OS family (`linux`, `macos`).
+- `os` (String) Compute OS family (`linux`, `macos`, `windows`).
 - `selectors` (Attributes List) Node label selectors for instance placement. (see [below for nested schema](#nestedatt--profiles--instance_shape--selectors))
 - `virtual_cpu` (Number) Number of virtual CPUs.
 

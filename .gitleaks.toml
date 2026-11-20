@@ -5,9 +5,15 @@ useDefault = true
 
 [[rules]]
 id = "namespace-cloud-jwt-token"
-description = "Namespace Cloud JWT-bearing credential (nsct_, nscw_, nscu_, tok_, st_)"
-regex = '''\b(?:nsct|nscw|nscu|tok|st)_eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'''
-keywords = ["nsct_", "nscw_", "nscu_", "tok_", "st_"]
+description = "Namespace Cloud JWT-bearing credential (nsct_, nscw_, nscu_, nsrt_, tok_, st_)"
+regex = '''\b(?:nsct|nscw|nscu|nsrt|tok|st)_eyJ[A-Za-z0-9_-]{8,}={0,2}\.[A-Za-z0-9_-]{8,}={0,2}\.[A-Za-z0-9_-]{8,}={0,2}'''
+keywords = ["nsct_", "nscw_", "nscu_", "nsrt_", "tok_", "st_"]
+
+[[rules]]
+id = "namespace-cloud-revokable-token"
+description = "Namespace Cloud opaque revokable token (nsrt_)"
+regex = '''\bnsrt_[A-Za-z0-9._-]{16,}\b'''
+keywords = ["nsrt_"]
 
 [allowlist]
 description = "Ignore untracked local agent metadata directory"

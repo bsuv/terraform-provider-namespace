@@ -24,10 +24,14 @@ import (
 	"golang.org/x/net/http/httpproxy"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"namespacelabs.dev/integrations/api"
-	"namespacelabs.dev/integrations/nsc"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 )
+
+const nscVersion = "1"
+
+// RequireTransportSecurity enforces transport-level security for per-RPC Bearer
+// credentials. It defaults to true in production and should only be set to false
+// by in-memory bufconn test harnesses using insecure.NewCredentials().
+var RequireTransportSecurity = true
 
 var (
 	// DebugWriterMutex protects DebugWriter, DebugShowRequests, and DebugShowResponses.
@@ -185,7 +189,7 @@ func (s *redactingClientStream) RecvMsg(m any) error {
 func NewConnectionWithEndpointWithTransportCredentials(
 	ctx context.Context,
 	endpoint string,
-	token api.TokenSource,
+	token TokenSource,
 	creds credentials.TransportCredentials,
 	opts ...grpc.DialOption,
 ) (*grpc.ClientConn, error) {
@@ -199,7 +203,7 @@ func NewConnectionWithEndpointWithTransportCredentials(
 	}
 
 	allowInsecure := shouldAllowInsecurePerRPCCreds(creds)
-	userAgent := fmt.Sprintf("nsc-go/%s", nsc.Version)
+	userAgent := fmt.Sprintf("nsc-go/%s", nscVersion)
 
 	proxyURL, err := resolveValidatedProxyURL(parsed)
 	if err != nil {
@@ -426,12 +430,12 @@ func ParseGRPCEndpoint(endpoint string) (string, error) {
 }
 
 type tokenCredWrapper struct {
-	token         api.TokenSource
+	token         TokenSource
 	allowInsecure bool
 }
 
 func shouldAllowInsecurePerRPCCreds(creds credentials.TransportCredentials) bool {
-	return creds != nil && creds.Info().SecurityProtocol == "insecure" && !grpcapi.RequireTransportSecurity
+	return creds != nil && creds.Info().SecurityProtocol == "insecure" && !RequireTransportSecurity
 }
 
 func (t tokenCredWrapper) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {

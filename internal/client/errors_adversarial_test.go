@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
 	"github.com/bsuv/terraform-provider-namespace/internal/client"
 	"github.com/bsuv/terraform-provider-namespace/internal/testutil"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -545,4 +546,151 @@ func TestAdversarial_RedactSecrets_BypassHardening(t *testing.T) {
 	if !strings.Contains(redacted, "safe_after=1") {
 		t.Errorf("quoted env var redaction consumed trailing text: %s", redacted)
 	}
+}
+
+func TestHandleGRPCError_PermissionDeniedErrorAndPreservedDetails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	t.Run("PermissionDenied decodes iamv1beta.PermissionDeniedError and preserves detailsStr", func(t *testing.T) {
+		t.Parallel()
+
+		st := status.New(codes.PermissionDenied, "access denied by IAM")
+		stWithDetails, err := st.WithDetails(&iamv1beta.PermissionDeniedError{
+			MissingAccessPermissions: []*iamv1beta.Access{
+				nil,
+				{
+					ResourceType: "github/runner-profile",
+					ResourceId:   "prof-123",
+					Action:       "update",
+				},
+				{
+					ResourceType: "tenant/member",
+					Action:       "list",
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to attach PermissionDeniedError details: %v", err)
+		}
+
+		var diags diag.Diagnostics
+		isNF := client.HandleGRPCError(ctx, stWithDetails.Err(), &diags, "update", "namespace_github_runner_profile")
+		if isNF || !diags.HasError() {
+			t.Fatalf("expected error diagnostic, got isNF=%v hasError=%v", isNF, diags.HasError())
+		}
+		summary := diags[0].Summary()
+		detail := diags[0].Detail()
+		if !strings.Contains(summary, "Authorization Failure") {
+			t.Fatalf("unexpected summary: %q", summary)
+		}
+		for _, want := range []string{
+			"Verify provider credentials and IAM permissions.",
+			`Missing permission: resource_type="github/runner-profile", resource_id="prof-123", action="update"`,
+			`Missing permission: resource_type="tenant/member", action="list"`,
+		} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("expected detail to contain %q, got:\n%s", want, detail)
+			}
+		}
+	})
+
+	t.Run("PermissionDeniedError secrets inside ResourceId are redacted", func(t *testing.T) {
+		t.Parallel()
+
+		leakTok := "nsrt_" + "perm_denied_secret_123456"
+		st := status.New(codes.PermissionDenied, "denied")
+		stWithDetails, err := st.WithDetails(&iamv1beta.PermissionDeniedError{
+			MissingAccessPermissions: []*iamv1beta.Access{
+				{
+					ResourceType: "vault/object",
+					ResourceId:   leakTok,
+					Action:       "read",
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to attach details: %v", err)
+		}
+
+		var diags diag.Diagnostics
+		client.HandleGRPCError(ctx, stWithDetails.Err(), &diags, "read", "namespace_vault_secret")
+		detail := diags[0].Detail()
+		if strings.Contains(detail, leakTok) {
+			t.Fatalf("PermissionDeniedError leaked secret in diagnostic detail: %s", detail)
+		}
+		if !strings.Contains(detail, "[REDACTED TOKEN]") {
+			t.Fatalf("expected [REDACTED TOKEN] in detail, got: %s", detail)
+		}
+	})
+
+	t.Run("Unauthenticated preserves ErrorInfo detailsStr", func(t *testing.T) {
+		t.Parallel()
+
+		st := status.New(codes.Unauthenticated, "invalid token")
+		stWithDetails, err := st.WithDetails(&errdetails.ErrorInfo{
+			Reason:   "TOKEN_EXPIRED",
+			Domain:   "iam.namespaceapis.com",
+			Metadata: map[string]string{"hint": "reauthenticate"},
+		})
+		if err != nil {
+			t.Fatalf("failed to attach details: %v", err)
+		}
+
+		var diags diag.Diagnostics
+		client.HandleGRPCError(ctx, stWithDetails.Err(), &diags, "read", "namespace_github_runner_profile")
+		detail := diags[0].Detail()
+		if !strings.Contains(detail, "Verify provider credentials and IAM permissions.") || !strings.Contains(detail, "TOKEN_EXPIRED") {
+			t.Fatalf("expected preserved ErrorInfo details in Unauthenticated detail, got:\n%s", detail)
+		}
+	})
+
+	t.Run("Revision conflict FailedPrecondition and Aborted preserve detailsStr", func(t *testing.T) {
+		t.Parallel()
+
+		for _, code := range []codes.Code{codes.FailedPrecondition, codes.Aborted} {
+			st := status.New(code, "version mismatch")
+			stWithDetails, err := st.WithDetails(&errdetails.ErrorInfo{
+				Reason: "REVISION_MISMATCH",
+				Domain: "github.namespaceapis.com",
+			})
+			if err != nil {
+				t.Fatalf("failed to attach details: %v", err)
+			}
+			var diags diag.Diagnostics
+			client.HandleGRPCError(ctx, stWithDetails.Err(), &diags, "update", "namespace_github_runner_profile")
+			detail := diags[0].Detail()
+			if !strings.Contains(detail, "Run `terraform refresh` and re-plan.") || !strings.Contains(detail, "REVISION_MISMATCH") {
+				t.Fatalf("expected preserved details in %s revision conflict detail, got:\n%s", code, detail)
+			}
+		}
+	})
+
+	t.Run("AlreadyExists preserves detailsStr for generic and shared image resources", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			resourceName string
+			wantSubstr   string
+		}{
+			{"namespace_tenant_group", "Use `terraform import` to manage it."},
+			{"namespace_registry_shared_image", "choose a distinct suffix or unshare the existing image."},
+		} {
+			st := status.New(codes.AlreadyExists, "duplicate entity")
+			stWithDetails, err := st.WithDetails(&errdetails.ErrorInfo{
+				Reason: "ALREADY_EXISTS",
+				Domain: "registry.namespaceapis.com",
+			})
+			if err != nil {
+				t.Fatalf("failed to attach details: %v", err)
+			}
+			var diags diag.Diagnostics
+			client.HandleGRPCError(ctx, stWithDetails.Err(), &diags, "create", tc.resourceName)
+			detail := diags[0].Detail()
+			if !strings.Contains(detail, tc.wantSubstr) || !strings.Contains(detail, "Reason: ALREADY_EXISTS") {
+				t.Fatalf("expected preserved details in AlreadyExists (%s), got:\n%s", tc.resourceName, detail)
+			}
+		}
+	})
 }

@@ -104,12 +104,10 @@ resource "namespace_github_runner_profile" "test" {
 
   cache_volume_settings = [
     {
-      volume_tag               = "vol1"
       volume_size_gb           = 25
       allow_commit_from_branch = []
     },
     {
-      volume_tag               = "vol2"
       volume_size_gb           = 50
       allow_commit_from_branch = ["main"]
     }
@@ -180,12 +178,10 @@ resource "namespace_github_runner_profile" "test" {
 
   cache_volume_settings = [
     {
-      volume_tag               = "vol1"
       volume_size_gb           = 25
       allow_commit_from_branch = ["develop", "feature/*"]
     },
     {
-      volume_tag               = "vol2"
       volume_size_gb           = 50
       allow_commit_from_branch = ["main", "release/*"]
     }
@@ -374,11 +370,11 @@ resource "namespace_tenant_group" "grp" {
   policies = [
     {
       policy = "namespace.cloud.compute.v1beta.UsagePolicy"
-      value  = "{\"max_instances\": 10}"
+      value  = "{\"concurrency_limits\":{\"max_instance_count\":10}}"
     },
     {
-      policy = "namespace.cloud.iam.v1beta.SecurityPolicy"
-      value  = "{\"require_mfa\": true}"
+      policy = "namespace.cloud.compute.v1beta.UsagePolicy"
+      value  = "{\"devbox_limits\":{\"max_count\":5}}"
     }
   ]
 }

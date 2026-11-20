@@ -31,6 +31,12 @@ func TestProvider_Configure_CustomEndpointTrustWarnings(t *testing.T) {
 			},
 			{
 				"token":            "nsct_test",
+				"global_endpoint":  "https://global.namespaceapi.com:443",
+				"iam_endpoint":     "https://iam.namespaceapi.com",
+				"compute_endpoint": "https://compute.namespaceapi.com:443",
+			},
+			{
+				"token":            "nsct_test",
 				"global_endpoint":  "https://localhost:8443",
 				"iam_endpoint":     "https://127.0.0.1:8443",
 				"compute_endpoint": "https://[::1]:8443",
@@ -71,6 +77,9 @@ func TestProvider_Configure_CustomEndpointTrustWarnings(t *testing.T) {
 		}
 		if !strings.Contains(warnings[0].Detail(), "proxy.corp.example") {
 			t.Errorf("expected warning detail to mention custom endpoint host, got: %s", warnings[0].Detail())
+		}
+		if !strings.Contains(warnings[0].Detail(), "namespaceapi.com") {
+			t.Errorf("expected warning detail to mention namespaceapi.com in trusted domains, got: %s", warnings[0].Detail())
 		}
 		if resp.ResourceData == nil {
 			t.Fatal("expected provider client to still initialize when warning is non-blocking")

@@ -190,7 +190,9 @@ func TestEmpirical_PaginationTraversal_250Records_And_CycleProtection(t *testing
 		d, schemaResp := setupTestDataSourceRegistryImages(t, srv)
 
 		cfg := registry.RegistryImagesDataSourceModel{
-			Repository: types.StringValue(repoName),
+			Repository:     types.StringValue(repoName),
+			DeletionFilter: types.StringNull(),
+			ExpiresAt:      types.ObjectNull(registry.ExpiresAtFilterAttrTypes),
 		}
 		configState := tfsdk.State{Schema: schemaResp.Schema}
 		_ = configState.Set(ctx, &cfg)

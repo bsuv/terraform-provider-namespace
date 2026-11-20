@@ -222,7 +222,7 @@ func isNonCanonicalNumericIPv4(normalized string) bool {
 }
 
 // IsTrustedHost reports whether raw resolves to a trusted Namespace domain
-// (namespaceapis.com, namespace.so, namespacelabs.dev or any subdomain) or a
+// (namespaceapis.com, namespaceapi.com, namespace.so, namespacelabs.dev or any subdomain) or a
 // loopback host (localhost, 127.0.0.0/8, ::1).
 func IsTrustedHost(raw string) bool {
 	value := strings.TrimSpace(raw)
@@ -244,7 +244,7 @@ func IsTrustedHost(raw string) bool {
 		return false
 	}
 
-	for _, domain := range []string{"namespaceapis.com", "namespace.so", "namespacelabs.dev"} {
+	for _, domain := range []string{"namespaceapis.com", "namespaceapi.com", "namespace.so", "namespacelabs.dev"} {
 		if host == domain || strings.HasSuffix(host, "."+domain) {
 			return true
 		}

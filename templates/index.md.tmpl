@@ -29,7 +29,7 @@ The provider resolves authentication credentials deterministically using the fol
 2. Explicit provider `token_file` attribute pointing to a valid credentials JSON file.
 3. `NSC_TOKEN` environment variable.
 4. `NSC_TOKEN_FILE` environment variable.
-5. Provider-local default discovery: workload credentials at `/var/run/nsc/token.json`, then `ns/token.json` beneath the operating system user configuration directory (typically `~/.config/ns/token.json` on Unix).
+5. Provider-local default discovery: workload credentials at `/var/run/nsc/token.json` on Unix (or `%NSC_METADATA_DIR%\token.json` / `%ProgramData%\Namespace\GuestAgent\metadata\token.json` on Windows), then `ns/token.json` beneath the operating system user configuration directory (typically `~/.config/ns/token.json` on Unix).
 
 Only an absent credential advances to the next source in the chain. Malformed or invalid credentials generate a configuration diagnostic error.
 Bearer tokens from default files are used directly. Session tokens are exchanged only through the configured `iam_endpoint`, cached in memory, and their provider-owned IAM connection is closed with the owning Namespace client.
@@ -55,7 +55,7 @@ Terraform ephemeral resources omit their result values from state and saved plan
 - **Retention & Lifecycle Policies:** Implement automated lifecycle and retention rules for state snapshots and historical versions to balance forensic audit requirements with data minimization principles.
 - **State Locking:** Enable distributed state locking (e.g., DynamoDB for S3, native locking in GCS / Terraform Cloud) to prevent concurrent mutating operations and avoid state corruption.
 - **Avoid Local State:** Never use local `terraform.tfstate` files in shared or CI environments where sensitive variables, unredacted outputs, or state snapshots could be exposed.
-- **Provider Log Redaction Boundaries:** The provider redacts recognized authorization headers, bearer tokens (`nsct_...`, `nscw_...`), private keys (RSA, EC, OpenSSH, PKCS#8), client certificates, and endpoint credentials in provider-emitted diagnostics and configured gRPC debug logs. It cannot sanitize output outside the provider boundary; operators remain responsible for CI/CD terminal buffers, Terraform outputs, `.tfvars` files, shell history, external wrappers, and OS-level environment dumps (`env`, `printenv`).
+- **Provider Log Redaction Boundaries:** The provider redacts recognized authorization headers, bearer and revokable tokens (`nsct_...`, `nscw_...`, `nscu_...`, `nsrt_...`, `tok_...`, `st_...`), JWTs (including prefixed JWTs such as `oidc_eyJ...` and `cognito_eyJ...`), `NSC_TOKEN`/`NSC_TOKEN_FILE`/`NSC_TOKEN_SPEC`/`NSC_TOKEN_SPEC_FILE` environment values, private keys (RSA, EC, OpenSSH, PKCS#8), client certificates, and endpoint credentials in provider-emitted diagnostics and configured gRPC debug logs. It cannot sanitize output outside the provider boundary; operators remain responsible for CI/CD terminal buffers, Terraform outputs, `.tfvars` files, shell history, external wrappers, and OS-level environment dumps (`env`, `printenv`).
 
 ## Migration & Deferral Notes
 
@@ -69,6 +69,6 @@ The following capabilities are deliberately omitted or deferred in the v0.1 rele
 ## Troubleshooting
 
 - **Authentication Errors (`Unauthenticated`):** Verify that `NSC_TOKEN` or `token` is active and unexpired. Run `nsc login` to refresh CLI credentials if relying on defaults.
-- **Permission Errors (`PermissionDenied`):** Ensure your actor token holds necessary tenant permissions (e.g., `RunnerProfilePolicy`, `issue_federation`, or partner credentials).
+- **Permission Errors (`PermissionDenied`):** Ensure your actor token holds necessary tenant permissions (e.g., `github/runner-profile` `manage`, `iam/tenant-group` `manage`, `issue_federation`, or partner credentials).
 - **Regional Routing Failures:** If compute or builder resources fail to resolve, verify that `compute_endpoint` points to a valid regional endpoint (e.g., `https://eu.compute.namespaceapis.com:443`).
 - **Revision Conflicts (`FailedPrecondition` / `Aborted`):** If a resource update fails due to a concurrent modification, run `terraform refresh` to align with the server revision before re-applying.

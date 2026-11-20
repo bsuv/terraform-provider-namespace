@@ -11,12 +11,15 @@ import (
 	"testing"
 	"time"
 
+	builderv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/builder/v1beta"
+	computev1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/compute/v1beta"
 	githubv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/github/v1beta"
 	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
 	bazelv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/integrations/bazel/v1beta"
 	gradlev1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/integrations/gradle/v1beta"
 	httpcachev1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/integrations/httpcache/v1beta"
 	registryv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/registry/v1beta"
+	imagesv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/private/images"
 	"github.com/hashicorp/go-plugin"
 	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
@@ -27,8 +30,8 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 
+	"github.com/bsuv/terraform-provider-namespace/internal/client"
 	"github.com/bsuv/terraform-provider-namespace/internal/provider"
 	"github.com/bsuv/terraform-provider-namespace/internal/testutil"
 )
@@ -73,7 +76,7 @@ func setupBlackBoxHarness(t *testing.T) *blackboxHarness {
 		t.Skip("terraform binary not found in PATH; skipping black-box Terraform CLI tests")
 	}
 
-	grpcapi.RequireTransportSecurity = false
+	client.RequireTransportSecurity = false
 
 	// 1. Initialize MockServer with all services
 	mockSrv := testutil.NewMockServer()
@@ -893,7 +896,6 @@ resource "namespace_github_runner_profile" "complex" {
 
   cache_volume_settings = [
     {
-      volume_tag                   = "build-cache"
       volume_size_gb               = 100
       volume_reserved_size_gb      = 10
       bundled_container_cache      = true
@@ -1052,5 +1054,420 @@ resource "namespace_tenant_group" "no_policies" {
 	planStdout, planStderr, err := h.runTerraform(t, tfEnv, "plan", "-detailed-exitcode")
 	if err != nil {
 		t.Fatalf("terraform plan after apply should indicate 0 changes: %v\nStderr: %s\nStdout: %s", err, planStderr, planStdout)
+	}
+}
+
+func TestBlackBox_UpgradeState_RunnerProfile_V0ToV1(t *testing.T) {
+	h := setupBlackBoxHarness(t)
+	h.mockServer.Profile.EnableStatefulProfiles()
+
+	createdResp, err := h.mockServer.Profile.CreateProfile(context.Background(), &githubv1beta.CreateProfileRequest{
+		Spec: &githubv1beta.RunnerProfileSpec{
+			Tag:         "legacy-v0-runner",
+			Os:          "ubuntu-24.04",
+			Description: "Migrated profile",
+			AccessLevel: githubv1beta.AccessLevel_ACCESS_LEVEL_PERMISSIVE,
+			CacheVolumeSettings: []*githubv1beta.CacheVolumeSettings{
+				{
+					VolumeSizeGb:          50,
+					VolumeReservedSizeGb:  5,
+					BundledContainerCache: true,
+					AllowCommitFromBranch: []string{"main"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed CreateProfile failed: %v", err)
+	}
+	prof := createdResp.GetProfile()
+
+	v0State := map[string]any{
+		"version":           4,
+		"terraform_version": "1.9.0",
+		"serial":            1,
+		"lineage":           "11111111-1111-1111-1111-111111111111",
+		"outputs":           map[string]any{},
+		"resources": []any{
+			map[string]any{
+				"mode":     "managed",
+				"type":     "namespace_github_runner_profile",
+				"name":     "legacy",
+				"provider": `provider["registry.terraform.io/bsuv/namespace"]`,
+				"instances": []any{
+					map[string]any{
+						"schema_version": 0,
+						"attributes": map[string]any{
+							"id":                       prof.GetProfileId(),
+							"profile_id":               prof.GetProfileId(),
+							"version":                  prof.GetVersion(),
+							"created_at":               prof.GetCreatedAt().AsTime().UTC().Format(time.RFC3339Nano),
+							"updated_at":               prof.GetUpdatedAt().AsTime().UTC().Format(time.RFC3339Nano),
+							"tag":                      "legacy-v0-runner",
+							"os":                       "ubuntu-24.04",
+							"description":              "Migrated profile",
+							"emoji":                    "",
+							"swap_size_mb":             0,
+							"builder_mode":             "BUILDER_MODE_UNSPECIFIED",
+							"access_level":             "ACCESS_LEVEL_PERMISSIVE",
+							"experimental_features":    nil,
+							"instance_shape":           nil,
+							"custom_runner_image_spec": nil,
+							"network_policy":           nil,
+							"custom_runner_images":     nil,
+							"cache_volume_settings": []any{
+								map[string]any{
+									"volume_tag":                   "legacy-vol-0",
+									"volume_size_gb":               50,
+									"volume_reserved_size_gb":      5,
+									"bundled_container_cache":      true,
+									"bundled_buildkit_cache":       false,
+									"bundled_git_mirror":           false,
+									"bundled_runner_tools_cache":   false,
+									"bundled_runner_actions_cache": false,
+									"allow_commit_from_branch":     []any{"main"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	v0Bytes, err := json.MarshalIndent(v0State, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal v0 state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(h.workDir, "terraform.tfstate"), v0Bytes, 0600); err != nil {
+		t.Fatalf("failed to write terraform.tfstate: %v", err)
+	}
+
+	mainTF := `
+terraform {
+  required_providers {
+    namespace = {
+      source = "bsuv/namespace"
+    }
+  }
+}
+
+variable "nsc_token" {
+  type      = string
+  sensitive = true
+}
+
+provider "namespace" {
+  token = var.nsc_token
+}
+
+resource "namespace_github_runner_profile" "legacy" {
+  tag          = "legacy-v0-runner"
+  os           = "ubuntu-24.04"
+  description  = "Migrated profile"
+  access_level = "ACCESS_LEVEL_PERMISSIVE"
+
+  cache_volume_settings = [
+    {
+      volume_size_gb           = 50
+      volume_reserved_size_gb  = 5
+      bundled_container_cache  = true
+      allow_commit_from_branch = ["main"]
+    }
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(mainTF), 0600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+
+	tfEnv := []string{"TF_VAR_nsc_token=" + blackboxSensitiveProviderToken}
+	if initOut, initErr, err := h.runTerraform(t, nil, "init", "-backend=false"); err != nil {
+		t.Fatalf("terraform init failed: %v\nStderr: %s\nStdout: %s", err, initErr, initOut)
+	}
+
+	if planOut, planErr, err := h.runTerraform(t, tfEnv, "plan", "-detailed-exitcode"); err != nil {
+		t.Fatalf("expected 0 diff after v0->v1 state upgrade: %v\nStderr: %s\nStdout: %s", err, planErr, planOut)
+	}
+
+	if appOut, appErr, err := h.runTerraform(t, tfEnv, "apply", "-refresh-only", "-auto-approve"); err != nil {
+		t.Fatalf("terraform apply -refresh-only failed: %v\nStderr: %s\nStdout: %s", err, appErr, appOut)
+	}
+
+	state, rawBytes := h.readState(t)
+	if strings.Contains(string(rawBytes), "volume_tag") {
+		t.Fatalf("upgraded terraform.tfstate still contains volume_tag:\n%s", string(rawBytes))
+	}
+	if len(state.Resources) != 1 || len(state.Resources[0].Instances) != 1 {
+		t.Fatalf("unexpected resources in upgraded state: %+v", state.Resources)
+	}
+	inst, ok := state.Resources[0].Instances[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected instance type: %T", state.Resources[0].Instances[0])
+	}
+	if sv, _ := inst["schema_version"].(float64); sv != 1 {
+		t.Errorf("expected schema_version 1 in upgraded state, got %v", inst["schema_version"])
+	}
+}
+
+func TestBlackBox_RunnerProfile_PositionalCacheVolumeTransitions(t *testing.T) {
+	h := setupBlackBoxHarness(t)
+	h.mockServer.Profile.EnableStatefulProfiles()
+
+	step1 := `
+terraform {
+  required_providers {
+    namespace = {
+      source = "bsuv/namespace"
+    }
+  }
+}
+variable "nsc_token" {
+  type      = string
+  sensitive = true
+}
+provider "namespace" {
+  token = var.nsc_token
+}
+resource "namespace_github_runner_profile" "pos" {
+  tag = "bb-pos-cv"
+  os  = "ubuntu-24.04"
+  cache_volume_settings = [
+    {
+      volume_size_gb           = 30
+      allow_commit_from_branch = []
+    },
+    {
+      volume_size_gb           = 60
+      allow_commit_from_branch = ["main", "release/*"]
+    }
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(step1), 0600); err != nil {
+		t.Fatalf("failed to write step1 main.tf: %v", err)
+	}
+	tfEnv := []string{"TF_VAR_nsc_token=" + blackboxSensitiveProviderToken}
+	if initOut, initErr, err := h.runTerraform(t, nil, "init", "-backend=false"); err != nil {
+		t.Fatalf("terraform init failed: %v\nStderr: %s\nStdout: %s", err, initErr, initOut)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "apply", "-auto-approve"); err != nil {
+		t.Fatalf("step1 apply failed: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "plan", "-detailed-exitcode"); err != nil {
+		t.Fatalf("step1 plan should have zero diff: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+
+	step2 := strings.Replace(step1, "volume_size_gb           = 30\n      allow_commit_from_branch = []", "volume_size_gb           = 45\n      allow_commit_from_branch = [\"develop\"]", 1)
+	step2 = strings.Replace(step2, "volume_size_gb           = 60\n      allow_commit_from_branch = [\"main\", \"release/*\"]", "volume_size_gb           = 80\n      allow_commit_from_branch = []", 1)
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(step2), 0600); err != nil {
+		t.Fatalf("failed to write step2 main.tf: %v", err)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "apply", "-auto-approve"); err != nil {
+		t.Fatalf("step2 apply failed: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "plan", "-detailed-exitcode"); err != nil {
+		t.Fatalf("step2 plan should have zero diff: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+}
+
+func TestBlackBox_RunnerProfile_CustomAccessAndPermissions(t *testing.T) {
+	h := setupBlackBoxHarness(t)
+	h.mockServer.Profile.EnableStatefulProfiles()
+
+	mainTF := `
+terraform {
+  required_providers {
+    namespace = {
+      source = "bsuv/namespace"
+    }
+  }
+}
+variable "nsc_token" {
+  type      = string
+  sensitive = true
+}
+provider "namespace" {
+  token = var.nsc_token
+}
+resource "namespace_github_runner_profile" "custom" {
+  tag          = "bb-custom-perm"
+  os           = "ubuntu-24.04"
+  access_level = "ACCESS_LEVEL_CUSTOM"
+  custom_permissions = [
+    {
+      resource_type = "vault/object"
+      resource_id   = "sec_123"
+      actions       = ["read"]
+    },
+    {
+      resource_type = "cache/bazel"
+      resource_id   = ""
+      actions       = []
+    }
+  ]
+}
+
+data "namespace_github_runner_profile" "by_id" {
+  profile_id = namespace_github_runner_profile.custom.profile_id
+}
+
+data "namespace_github_runner_profiles" "all" {
+  depends_on = [namespace_github_runner_profile.custom]
+}
+`
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(mainTF), 0600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+	tfEnv := []string{"TF_VAR_nsc_token=" + blackboxSensitiveProviderToken}
+	if initOut, initErr, err := h.runTerraform(t, nil, "init", "-backend=false"); err != nil {
+		t.Fatalf("terraform init failed: %v\nStderr: %s\nStdout: %s", err, initErr, initOut)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "apply", "-auto-approve"); err != nil {
+		t.Fatalf("apply failed: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "plan", "-detailed-exitcode"); err != nil {
+		t.Fatalf("plan should have zero diff: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+
+	// Update to ACCESS_LEVEL_LIMITED without custom_permissions
+	limitedTF := `
+terraform {
+  required_providers {
+    namespace = {
+      source = "bsuv/namespace"
+    }
+  }
+}
+variable "nsc_token" {
+  type      = string
+  sensitive = true
+}
+provider "namespace" {
+  token = var.nsc_token
+}
+resource "namespace_github_runner_profile" "custom" {
+  tag          = "bb-custom-perm"
+  os           = "ubuntu-24.04"
+  access_level = "ACCESS_LEVEL_LIMITED"
+}
+`
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(limitedTF), 0600); err != nil {
+		t.Fatalf("failed to write limitedTF: %v", err)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "apply", "-auto-approve"); err != nil {
+		t.Fatalf("apply limitedTF failed: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "plan", "-detailed-exitcode"); err != nil {
+		t.Fatalf("plan after update to ACCESS_LEVEL_LIMITED should have zero diff: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+
+	// Invalid empty resource_type fails terraform validate
+	badTypeTF := strings.Replace(mainTF, `resource_type = "vault/object"`, `resource_type = ""`, 1)
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(badTypeTF), 0600); err != nil {
+		t.Fatalf("failed to write badTypeTF: %v", err)
+	}
+	if _, _, err := h.runTerraform(t, tfEnv, "validate"); err == nil {
+		t.Fatal("expected terraform validate to fail on empty resource_type")
+	}
+
+	// Missing actions fails terraform validate
+	badActionsTF := strings.Replace(mainTF, `actions       = ["read"]`, "", 1)
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(badActionsTF), 0600); err != nil {
+		t.Fatalf("failed to write badActionsTF: %v", err)
+	}
+	if _, _, err := h.runTerraform(t, tfEnv, "validate"); err == nil {
+		t.Fatal("expected terraform validate to fail when actions is omitted")
+	}
+}
+
+func TestBlackBox_WindowsOS_RunnerProfileAndDataSources(t *testing.T) {
+	h := setupBlackBoxHarness(t)
+	h.mockServer.Profile.EnableStatefulProfiles()
+
+	h.mockServer.Image.ListBaseImagesFunc = func(ctx context.Context, req *githubv1beta.ListBaseImagesRequest) (*githubv1beta.ListBaseImagesResponse, error) {
+		return &githubv1beta.ListBaseImagesResponse{
+			Images: []*githubv1beta.RunnerBaseImage{
+				{
+					Label:    "windows-2022",
+					ImageRef: "nscr.io/official/windows-2022:latest",
+					Title:    "Windows Server 2022",
+					Spec: &imagesv1beta.BaseImage{
+						Id:           "img_win_2022",
+						Os:           "windows",
+						ReleaseStage: imagesv1beta.ReleaseStage_PRODUCTION,
+					},
+				},
+			},
+		}, nil
+	}
+	h.mockServer.Builder.GetBuilderConfigurationFunc = func(ctx context.Context, req *builderv1beta.GetBuilderConfigurationRequest) (*builderv1beta.GetBuilderConfigurationResponse, error) {
+		return &builderv1beta.GetBuilderConfigurationResponse{
+			BuildkitEndpoint:     "builder.namespace.so:443",
+			FullBuildkitEndpoint: "tcp://builder.namespace.so:443",
+			CacheSizeMb:          20480,
+			Shape: &computev1beta.InstanceShape{
+				VirtualCpu:      8,
+				MemoryMegabytes: 16384,
+				MachineArch:     "amd64",
+				Os:              "windows",
+			},
+		}, nil
+	}
+
+	mainTF := `
+terraform {
+  required_providers {
+    namespace = {
+      source = "bsuv/namespace"
+    }
+  }
+}
+variable "nsc_token" {
+  type      = string
+  sensitive = true
+}
+provider "namespace" {
+  token = var.nsc_token
+}
+resource "namespace_github_runner_profile" "win" {
+  tag = "bb-win-runner"
+  os  = "windows-2022"
+  instance_shape = {
+    virtual_cpu      = 4
+    memory_megabytes = 8192
+    machine_arch     = "amd64"
+    os               = "windows"
+  }
+}
+data "namespace_github_base_images" "win" {}
+data "namespace_builder_configuration" "win" {
+  platform = "windows/amd64"
+}
+`
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(mainTF), 0600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+	tfEnv := []string{"TF_VAR_nsc_token=" + blackboxSensitiveProviderToken}
+	if initOut, initErr, err := h.runTerraform(t, nil, "init", "-backend=false"); err != nil {
+		t.Fatalf("terraform init failed: %v\nStderr: %s\nStdout: %s", err, initErr, initOut)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "apply", "-auto-approve"); err != nil {
+		t.Fatalf("apply failed: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+	if out, errOut, err := h.runTerraform(t, tfEnv, "plan", "-detailed-exitcode"); err != nil {
+		t.Fatalf("plan should have zero diff: %v\nStderr: %s\nStdout: %s", err, errOut, out)
+	}
+
+	_, rawBytes := h.readState(t)
+	if !strings.Contains(string(rawBytes), `"windows"`) {
+		t.Fatalf("expected 'windows' in terraform.tfstate:\n%s", string(rawBytes))
+	}
+
+	badOS := strings.Replace(mainTF, `os               = "windows"`, `os               = "freebsd"`, 1)
+	if err := os.WriteFile(filepath.Join(h.workDir, "main.tf"), []byte(badOS), 0600); err != nil {
+		t.Fatalf("failed to write badOS main.tf: %v", err)
+	}
+	if _, _, err := h.runTerraform(t, tfEnv, "validate"); err == nil {
+		t.Fatal("expected terraform validate to fail for instance_shape.os = 'freebsd'")
 	}
 }

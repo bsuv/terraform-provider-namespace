@@ -798,6 +798,537 @@ class TestAcceptanceReportGeneratorAdversarial(unittest.TestCase):
         self.assertNotIn(stderr_tok, report_md)
         self.assertIn("NSC_TOKEN=[REDACTED]", sanitized_log)
 
+    # 30. Opaque nsrt_ tokens, NSC_TOKEN_SPEC*, and prefixed JWTs (oidc_eyJ..., cognito_eyJ...) are redacted
+    def test_30_nsrt_token_spec_and_prefixed_jwts_redacted(self):
+        raw_jwt = ".".join(["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJ1c2VyXzEyMyJ9", "sig_value_abcdef123456"])
+        nsrt_opaque = "nsrt_" + "revokable_opaque_token_123456789"
+        nsrt_jwt = "nsrt_" + raw_jwt
+        oidc_jwt = "oidc_" + raw_jwt
+        cognito_jwt = "cognito_" + raw_jwt
+        spec_val = "nsrt_" + "spec_inline_secret_123456"
+        spec_file = "/run/secrets/nsc-token-spec.json"
+
+        events = [
+            json.dumps({
+                "Time": "2026-01-01T00:00:00Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_TokenRedaction",
+                "Output": (
+                    f"opaque={nsrt_opaque} jwt={nsrt_jwt} oidc={oidc_jwt} cognito={cognito_jwt} "
+                    f"NSC_TOKEN_SPEC={spec_val} NSC_TOKEN_SPEC_FILE={spec_file}\n"
+                ),
+            }),
+            json.dumps({
+                "Time": "2026-01-01T00:00:01Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_TokenRedaction",
+                "Output": f"quoted_spec NSC_TOKEN_SPEC='{{\"token\":\"{spec_val}\"}}' end\n",
+            }),
+        ]
+        log_input = f"{build_valid_matrix_log()}\n" + "\n".join(events)
+        proc, report_md, sanitized_log = self.run_generator(log_input)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        secrets = [nsrt_opaque, nsrt_jwt, oidc_jwt, cognito_jwt, spec_val, spec_file, raw_jwt]
+        for secret in secrets:
+            self.assertNotIn(secret, sanitized_log)
+            self.assertNotIn(secret, report_md)
+
+        self.assertIn("[REDACTED_TOKEN]", sanitized_log)
+        self.assertIn("[REDACTED_JWT]", sanitized_log)
+        self.assertIn("NSC_TOKEN_SPEC=[REDACTED]", sanitized_log)
+        self.assertIn("NSC_TOKEN_SPEC_FILE=[REDACTED]", sanitized_log)
+        self.assertIn("- **Secret Scrubbing:** All bearer tokens", report_md)
+        for line in sanitized_log.strip().splitlines():
+            json.loads(line)
+
+    # 31. Padded base64url JWTs and colon-delimited / unquoted JSON NSC_TOKEN_SPEC* are redacted
+    def test_31_padded_jwts_and_nsc_token_spec_json_redacted(self):
+        padded_jwt = ".".join(["ey" + "JhbGciOiJIUzI1NiJ9", "ey" + "JzdWIiOiIxMjMifQ==", "c2ln=="])
+        oidc_padded = "oidc_" + padded_jwt
+        nsrt_padded = "nsrt_" + padded_jwt
+        spec_val = "nsrt_" + "json_spec_secret_987654"
+        spec_file = "/run/secrets/nsc-private-spec.json"
+        unquoted_path = "/run/secrets/nsc-unquoted-spec.json"
+
+        events = [
+            json.dumps({
+                "Time": "2026-01-01T00:00:00Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_PaddedJWTAndSpecJSON",
+                "Output": f"bare={padded_jwt} oidc={oidc_padded} nsrt={nsrt_padded}\n",
+            }),
+            json.dumps({
+                "Time": "2026-01-01T00:00:01Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_PaddedJWTAndSpecJSON",
+                "Output": (
+                    f'{{"NSC_TOKEN_SPEC_FILE":"{spec_file}","NSC_TOKEN_SPEC":"{spec_val}"}} '
+                    f'NSC_TOKEN_SPEC={{"file":"{unquoted_path}"}} ok=1\n'
+                ),
+            }),
+        ]
+        log_input = f"{build_valid_matrix_log()}\n" + "\n".join(events)
+        proc, report_md, sanitized_log = self.run_generator(log_input)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for secret in [padded_jwt, oidc_padded, nsrt_padded, spec_val, spec_file, unquoted_path]:
+            self.assertNotIn(secret, sanitized_log)
+            self.assertNotIn(secret, report_md)
+
+        self.assertIn("bare=[REDACTED_JWT] oidc=[REDACTED_JWT] nsrt=[REDACTED_TOKEN]", sanitized_log)
+        self.assertIn("NSC_TOKEN_SPEC=[REDACTED] ok=1", sanitized_log)
+        for line in sanitized_log.strip().splitlines():
+            json.loads(line)
+
+    # 32. Colon-delimited JSON object NSC_TOKEN_SPEC, 2-level nested NSC_TOKEN_SPEC=, escaped quotes, unclosed brace, and PASSPHRASE idempotency
+    def test_32_colon_object_and_deep_nested_token_spec_redacted(self):
+        colon_obj_secret = "/run/secrets/colon_obj_secret.json"
+        deep_1 = "/run/secrets/deep_1.json"
+        deep_2 = "/run/secrets/deep_2.json"
+        escaped_secret = "/run/secrets/escaped_quote_secret.json"
+        unclosed_secret = "nsrt_" + "unclosed_fallback_secret_12345"
+        passphrase_val = "my_secret_passphrase_123"
+
+        events = [
+            json.dumps({
+                "Time": "2026-01-01T00:00:00Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_NestedTokenSpecObject",
+                "Output": (
+                    f'{{"NSC_TOKEN_SPEC":{{"file":"{colon_obj_secret}"}}}} '
+                    f'NSC_TOKEN_SPEC={{"auth":{{"nested":{{"file":"{deep_1}"}}}},"path":"{deep_2}"}} ok=1\n'
+                ),
+            }),
+            json.dumps({
+                "Time": "2026-01-01T00:00:01Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_NestedTokenSpecObject",
+                "Output": (
+                    f'{{"NSC_TOKEN_SPEC":{{"payload":"a\\"b}}c\\\\","file":"{escaped_secret}"}},"ok":1}} '
+                    f'PASSPHRASE={passphrase_val} PRE_REDACTED=[REDACTED PASSWORD] PASSPHRASE=[REDACTED PASSWORD]\n'
+                ),
+            }),
+            json.dumps({
+                "Time": "2026-01-01T00:00:02Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_NestedTokenSpecObject",
+                "Output": f'NSC_TOKEN_SPEC={{"unclosed":"{unclosed_secret}\nsafe=1\n',
+            }),
+        ]
+        log_input = f"{build_valid_matrix_log()}\n" + "\n".join(events)
+        proc, report_md, sanitized_log = self.run_generator(log_input)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for secret in [colon_obj_secret, deep_1, deep_2, escaped_secret, unclosed_secret, passphrase_val]:
+            self.assertNotIn(secret, sanitized_log)
+            self.assertNotIn(secret, report_md)
+
+        parsed_outputs = "\n".join(
+            json.loads(line).get("Output", "")
+            for line in sanitized_log.strip().splitlines()
+        )
+        self.assertIn('{"NSC_TOKEN_SPEC":"[REDACTED_TOKEN]"}', parsed_outputs)
+        self.assertIn("NSC_TOKEN_SPEC=[REDACTED] ok=1", parsed_outputs)
+        self.assertIn('{"NSC_TOKEN_SPEC":"[REDACTED_TOKEN]","ok":1}', parsed_outputs)
+        self.assertIn("PASSPHRASE=[REDACTED]", parsed_outputs)
+        self.assertIn("PASSPHRASE=[REDACTED PASSWORD]", parsed_outputs)
+        self.assertNotIn("PASSWORD] PASSWORD]", parsed_outputs)
+        self.assertIn("safe=1", parsed_outputs)
+
+    # 33. JSON-escaped equals-delimited NSC_TOKEN_SPEC inside JSON logs, Go-redacted auth markers, parenthesized st_ tokens, and 2-pass idempotency
+    def test_33_json_escaped_equals_token_spec_auth_markers_and_parenthesized_tokens(self):
+        in_log_secret = "/run/secrets/in_log.json"
+        in_log_nested_secret = "/run/secrets/in_log2.json"
+        multiline_in_log_secret = "/run/secrets/multiline_in_log.json"
+        tab_in_log_secret = "/run/secrets/tab_in_log.json"
+        cr_in_log_secret = "/run/secrets/cr_in_log.json"
+        multiline_in_log_nested_secret = "/run/secrets/multiline_in_log2.json"
+        unclosed_tok = "nsrt_" + "unclosed_log_tok_12345"
+        st_tok = "st_" + "1234567890abcdef"
+        in_log_line = (
+            '{"log":"env NSC_TOKEN_SPEC={\\"a\\":\\"x}y\\",\\"file\\":\\"'
+            + in_log_secret
+            + '\\"} failed"}'
+        )
+        multiline_in_log_line = (
+            '{"log":"env NSC_TOKEN_SPEC={\\n  \\"a\\":\\"x}y\\",\\n  \\"file\\":\\"'
+            + multiline_in_log_secret
+            + '\\"\\n} failed"}'
+        )
+        tab_in_log_line = (
+            '{"log":"env NSC_TOKEN_SPEC={\\t\\"a\\":\\"x}y\\",\\"file\\":\\"'
+            + tab_in_log_secret
+            + '\\"} failed"}'
+        )
+        cr_in_log_line = (
+            '{"log":"env NSC_TOKEN_SPEC={\\r  \\"a\\":\\"x}y\\",\\r  \\"file\\":\\"'
+            + cr_in_log_secret
+            + '\\"\\r} failed"}'
+        )
+        nested_in_log_line = (
+            '{"outer":"{\\"log\\":\\"env NSC_TOKEN_SPEC={\\\\\\"a\\\\\\":\\\\\\"x}y\\\\\\",\\\\\\"file\\\\\\":\\\\\\"'
+            + in_log_nested_secret
+            + '\\\\\\"} failed\\"}"}'
+        )
+        nested_multiline_in_log_line = (
+            '{"outer":"{\\"log\\":\\"env NSC_TOKEN_SPEC={\\\\n  \\\\\\"a\\\\\\":\\\\\\"x}y\\\\\\",\\\\n  \\\\\\"file\\\\\\":\\\\\\"'
+            + multiline_in_log_nested_secret
+            + '\\\\\\"\\\\n} failed\\"}"}'
+        )
+        unclosed_in_log_line = (
+            '{"log":"env NSC_TOKEN_SPEC={\\"a\\":\\"1\\",\\"tok\\":\\"'
+            + unclosed_tok
+            + '\\"","ok":1}'
+        )
+        auth_markers_line = (
+            "authorization: Bearer [REDACTED TOKEN] "
+            "authorization: Basic [REDACTED SECRET] "
+            "authorization: [Bearer [REDACTED TOKEN]] "
+            "authorization: [Basic [REDACTED SECRET]]"
+        )
+        json_auth_bearer_line = '{"log":"authorization: Bearer secret_token_12345"}'
+        json_auth_basic_line = '{"log":"authorization: Basic dXNlcjpwYXNz"}'
+        paren_token_line = f"(token: {st_tok}) failed"
+
+        events = [
+            json.dumps({
+                "Time": "2026-11-20T00:00:00Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_JsonEscapedSpecAndMarkers",
+                "Output": (
+                    f"{in_log_line}\n{multiline_in_log_line}\n{tab_in_log_line}\n{cr_in_log_line}\n"
+                    f"{nested_in_log_line}\n{nested_multiline_in_log_line}\n{unclosed_in_log_line}\n"
+                    f"{auth_markers_line}\n{json_auth_bearer_line}\n{json_auth_basic_line}\n{paren_token_line}\n"
+                ),
+            }),
+        ]
+        log_input = f"{build_valid_matrix_log()}\n" + "\n".join(events)
+        proc, report_md, sanitized_log = self.run_generator(log_input)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for secret in [
+            in_log_secret,
+            in_log_nested_secret,
+            multiline_in_log_secret,
+            tab_in_log_secret,
+            cr_in_log_secret,
+            multiline_in_log_nested_secret,
+            unclosed_tok,
+            st_tok,
+            "secret_token_12345",
+            "dXNlcjpwYXNz",
+        ]:
+            self.assertNotIn(secret, sanitized_log)
+            self.assertNotIn(secret, report_md)
+
+        parsed_outputs = "\n".join(
+            json.loads(line).get("Output", "")
+            for line in sanitized_log.strip().splitlines()
+        )
+        self.assertEqual(parsed_outputs.count('{"log":"env NSC_TOKEN_SPEC=[REDACTED] failed"}'), 4)
+        self.assertEqual(parsed_outputs.count('{"outer":"{\\"log\\":\\"env NSC_TOKEN_SPEC=[REDACTED] failed\\"}"}'), 2)
+        self.assertIn('{"log":"env NSC_TOKEN_SPEC={\\"a\\":\\"1\\",\\"tok\\":\\"[REDACTED_TOKEN]\\"","ok":1}', parsed_outputs)
+        self.assertIn("authorization: Bearer [REDACTED_TOKEN] authorization: Basic [REDACTED_SECRET]", parsed_outputs)
+        self.assertIn("authorization: [Bearer [REDACTED_TOKEN]] authorization: [Basic [REDACTED_SECRET]]", parsed_outputs)
+        self.assertIn('{"log":"authorization: Bearer [REDACTED_TOKEN]"}', parsed_outputs)
+        self.assertIn('{"log":"authorization: Basic [REDACTED_SECRET]"}', parsed_outputs)
+        self.assertNotIn("TOKEN] TOKEN]", parsed_outputs)
+        self.assertNotIn("SECRET] SECRET]", parsed_outputs)
+        self.assertIn("(token: [REDACTED_TOKEN]) failed", parsed_outputs)
+
+        # Verify 2-pass idempotency of sanitized-acceptance.log
+        proc2, _, sanitized_log2 = self.run_generator(sanitized_log)
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertEqual(sanitized_log2, sanitized_log)
+
+    # 34. Quoted Bearer/Basic credentials under unquoted authorization keys and JSON escape boundaries
+    def test_34_unquoted_auth_quoted_creds_and_json_escape_boundaries(self):
+        short_bearer = "short_tok"
+        long_basic = "dXNlcjpwYXNzd29yZF9sb25nX3NlY3JldF8xMjM0NTY3ODkwYWJjZGVm"
+        short_basic = "dXNlcjpwYXNz"
+        tok_nl_secret = "my_secret_tok"
+        pass_quote_secret = "my_pass"
+        env_quote_secret = "my_secret_val"
+
+        raw_auth_bearer = f'authorization="Bearer {short_bearer}"'
+        raw_auth_basic = f'authorization="Basic {long_basic}"'
+        json_auth_bearer = '{"log":"authorization: \\"Bearer ' + short_bearer + '\\"","ok":1}'
+        json_auth_basic = '{"log":"authorization: \\"Basic ' + short_basic + '\\"","ok":1}'
+        prose_auth = 'authorization: "granted"'
+        json_prose_auth = '{"log":"authorization: \\"granted\\"","ok":1}'
+        json_tok_nl = '{"log":"token: ' + tok_nl_secret + '\\nnext_field: ok","ok":1}'
+        json_pass_quote = '{"log":"got password=' + pass_quote_secret + '\\"}"}'
+        json_env_quote = '{"log":"env NSC_TOKEN=' + env_quote_secret + '\\"}"}'
+
+        events = [
+            json.dumps({
+                "Time": "2026-11-20T00:00:00Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_UnquotedAuthAndEscapeBoundaries",
+                "Output": "\n".join([
+                    raw_auth_bearer,
+                    raw_auth_basic,
+                    json_auth_bearer,
+                    json_auth_basic,
+                    prose_auth,
+                    json_prose_auth,
+                    json_tok_nl,
+                    json_pass_quote,
+                    json_env_quote,
+                ]) + "\n",
+            }),
+        ]
+        log_input = f"{build_valid_matrix_log()}\n" + "\n".join(events)
+        proc, report_md, sanitized_log = self.run_generator(log_input)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for secret in [
+            short_bearer,
+            long_basic,
+            short_basic,
+            tok_nl_secret,
+            pass_quote_secret,
+            env_quote_secret,
+        ]:
+            self.assertNotIn(secret, sanitized_log)
+            self.assertNotIn(secret, report_md)
+
+        parsed_outputs = []
+        for line in sanitized_log.strip().splitlines():
+            ev = json.loads(line)
+            if ev.get("Test") == "TestAccAuth_UnquotedAuthAndEscapeBoundaries" and "Output" in ev:
+                parsed_outputs.extend(ev["Output"].splitlines())
+
+        self.assertIn('authorization="Bearer [REDACTED_TOKEN]"', parsed_outputs)
+        self.assertIn('authorization="Basic [REDACTED_SECRET]"', parsed_outputs)
+        self.assertIn('{"log":"authorization: \\"Bearer [REDACTED_TOKEN]\\"","ok":1}', parsed_outputs)
+        self.assertIn('{"log":"authorization: \\"Basic [REDACTED_SECRET]\\"","ok":1}', parsed_outputs)
+        self.assertIn('authorization: "granted"', parsed_outputs)
+        self.assertIn('{"log":"authorization: \\"granted\\"","ok":1}', parsed_outputs)
+        self.assertIn('{"log":"token: [REDACTED_TOKEN]\\nnext_field: ok","ok":1}', parsed_outputs)
+        self.assertIn('{"log":"got password=[REDACTED_PASSWORD]\\"}"}', parsed_outputs)
+        self.assertIn('{"log":"env NSC_TOKEN=[REDACTED]\\"}"}', parsed_outputs)
+
+        for out_line in parsed_outputs:
+            if out_line.startswith("{"):
+                json.loads(out_line)
+
+        proc2, _, sanitized_log2 = self.run_generator(sanitized_log)
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertEqual(sanitized_log2, sanitized_log)
+
+    # 35. JSON-escape-prefixed secrets (\n, \r, \t, \b, \f, \u000a, \u0026), literal \\n boundary preservation, and query &safe=1 preservation
+    def test_35_json_escape_prefixed_secrets_and_query_string_amp(self):
+        raw_jwt = ".".join(["ey" + "JhbGciOiJIUzI1NiJ9", "ey" + "JzdWIiOiJlc2NfdGVzdCJ9", "esc_sig_123456"])
+        nsrt_secret = "nsrt_" + "esc_revokable_secret_123456"
+        nsct_secret = "nsct_" + "esc_cluster_secret_123456"
+        oidc_jwt = "oidc_" + raw_jwt
+        spec_file_secret = "/run/secrets/esc_private_spec.json"
+        nsc_tok_secret = "esc_opaque_nsc_tok_val"
+        spec_obj_secret = "/run/secrets/esc_obj1.json"
+        tok_obj_secret = "/run/secrets/esc_obj2.json"
+        bearer_short = "esc_short_tok"
+        basic_secret = "dXNlcj" + "pwYXNzX2VzYw=="
+        pass_secret = "esc_pass_secret_123"
+        sec_secret = "esc_tab_secret_123"
+        bearer_long = "1234567890abcdefghij"
+        cr_nsrt = "nsrt_" + "cr_revokable_123456"
+        bs_oidc = "oidc_" + ".".join(["ey" + "JhbGciOiJIUzI1NiJ9", "ey" + "JzdWIiOiJicyJ9", "bs_sig_123"])
+        ff_pass = "ff_secret_pass_123"
+        u0a_oidc = "oidc_" + ".".join(["ey" + "JhbGciOiJIUzI1NiJ9", "ey" + "JzdWIiOiJ1MGEifQ", "u0a_sig_123"])
+        u26_pass = "u26_secret_pass_123"
+        query_tok = "q_tok_123"
+        query_pw = "q_pw_123"
+
+        raw_lines = [
+            f'{{"log":"line1\\n{nsrt_secret}"}}',
+            f'{{"log":"line1\\n{nsct_secret}"}}',
+            f'{{"log":"jwt:\\t{raw_jwt}"}}',
+            f'{{"log":"jwt:\\n{oidc_jwt}"}}',
+            f'{{"log":"env:\\nNSC_TOKEN_SPEC_FILE={spec_file_secret}"}}',
+            f'{{"log":"env:\\nNSC_TOKEN={nsc_tok_secret}"}}',
+            f'{{"log":"env:\\nNSC_TOKEN_SPEC={{\\"file\\":\\"{spec_obj_secret}\\"}}"}}',
+            f'{{"log":"env:\\nNSC_TOKEN={{\\"file\\":\\"{tok_obj_secret}\\"}}"}}',
+            f'{{"log":"hdr:\\nauthorization: Bearer {bearer_short}"}}',
+            f'{{"log":"hdr:\\nauthorization: Basic {basic_secret}"}}',
+            f'{{"log":"err:\\npassword={pass_secret}"}}',
+            f'{{"log":"err:\\tsecret={sec_secret}"}}',
+            f'{{"log":"hdr:\\nbearer {bearer_long}"}}',
+            f'{{"log":"cr:\\r{cr_nsrt}"}}',
+            f'{{"log":"bs:\\b{bs_oidc}"}}',
+            f'{{"log":"ff:\\fpassword={ff_pass}"}}',
+            f'{{"log":"u0a:\\u000a{u0a_oidc}"}}',
+            f'{{"log":"https://example.invalid/?a=1\\u0026password={u26_pass}\\u0026safe=1"}}',
+            '{"log":"literal:\\\\npassword=keep_literal_boundary"}',
+            f'url=https://example.invalid/auth?token={query_tok}&password={query_pw}&safe=1',
+        ]
+
+        events = [
+            json.dumps({
+                "Time": "2026-11-20T00:00:00Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_JSONEscapePrefixesAndQueryAmp",
+                "Output": "\n".join(raw_lines) + "\n",
+            }),
+        ]
+        log_input = f"{build_valid_matrix_log()}\n" + "\n".join(events)
+        proc, report_md, sanitized_log = self.run_generator(log_input)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for secret in [
+            raw_jwt,
+            nsrt_secret,
+            nsct_secret,
+            oidc_jwt,
+            spec_file_secret,
+            nsc_tok_secret,
+            spec_obj_secret,
+            tok_obj_secret,
+            bearer_short,
+            basic_secret,
+            pass_secret,
+            sec_secret,
+            bearer_long,
+            cr_nsrt,
+            bs_oidc,
+            ff_pass,
+            u0a_oidc,
+            u26_pass,
+            query_tok,
+            query_pw,
+        ]:
+            self.assertNotIn(secret, sanitized_log)
+            self.assertNotIn(secret, report_md)
+
+        parsed_outputs = []
+        for line in sanitized_log.strip().splitlines():
+            ev = json.loads(line)
+            if ev.get("Test") == "TestAccAuth_JSONEscapePrefixesAndQueryAmp" and "Output" in ev:
+                parsed_outputs.extend(ev["Output"].splitlines())
+
+        expected_outputs = [
+            '{"log":"line1\\n[REDACTED_TOKEN]"}',
+            '{"log":"line1\\n[REDACTED_TOKEN]"}',
+            '{"log":"jwt:\\t[REDACTED_JWT]"}',
+            '{"log":"jwt:\\n[REDACTED_JWT]"}',
+            '{"log":"env:\\nNSC_TOKEN_SPEC_FILE=[REDACTED]"}',
+            '{"log":"env:\\nNSC_TOKEN=[REDACTED]"}',
+            '{"log":"env:\\nNSC_TOKEN_SPEC=[REDACTED]"}',
+            '{"log":"env:\\nNSC_TOKEN=[REDACTED]"}',
+            '{"log":"hdr:\\nauthorization: Bearer [REDACTED_TOKEN]"}',
+            '{"log":"hdr:\\nauthorization: Basic [REDACTED_SECRET]"}',
+            '{"log":"err:\\npassword=[REDACTED_PASSWORD]"}',
+            '{"log":"err:\\tsecret=[REDACTED_SECRET]"}',
+            '{"log":"hdr:\\nbearer [REDACTED_TOKEN]"}',
+            '{"log":"cr:\\r[REDACTED_TOKEN]"}',
+            '{"log":"bs:\\b[REDACTED_JWT]"}',
+            '{"log":"ff:\\fpassword=[REDACTED_PASSWORD]"}',
+            '{"log":"u0a:\\u000a[REDACTED_JWT]"}',
+            '{"log":"https://example.invalid/?a=1\\u0026password=[REDACTED_PASSWORD]\\u0026safe=1"}',
+            '{"log":"literal:\\\\npassword=keep_literal_boundary"}',
+            'url=https://example.invalid/auth?token=[REDACTED_TOKEN]&password=[REDACTED_PASSWORD]&safe=1',
+        ]
+        for want in expected_outputs:
+            self.assertIn(want, parsed_outputs)
+
+        for out_line in parsed_outputs:
+            if out_line.startswith("{"):
+                json.loads(out_line)
+
+        proc2, _, sanitized_log2 = self.run_generator(sanitized_log)
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertEqual(sanitized_log2, sanitized_log)
+
+    # 36. Lowercase \uXXXb / \uXXXf unicode escape boundaries and URL query passphrase/password & boundary
+    def test_36_lowercase_hex_bf_unicode_boundaries_and_query_passphrase(self):
+        raw_jwt = ".".join(["ey" + "JhbGciOiJIUzI1NiJ9", "ey" + "JzdWIiOiJ1MzJmIn0", "u32f_sig_123456"])
+        u3b_nsrt = "nsrt_" + "u3b_semi_secret_123456"
+        u2f_oidc = "oidc_" + raw_jwt
+        u3f_pw = "u3f_pw_secret_123"
+        u3b_sec = "u3b_sec_secret_123"
+        u3d_nsc_tok = "u3d_nsc_tok_123"
+        u2b_bearer = "u2b_short_bearer_tok"
+        q_pp = "pp_999"
+        q_pw = "pw_888"
+
+        raw_lines = [
+            f'{{"msg":"a\\u003b{u3b_nsrt}"}}',
+            f'{{"msg":"a\\u002f{u2f_oidc}"}}',
+            f'{{"msg":"a\\u003fpassword={u3f_pw}"}}',
+            f'{{"msg":"a\\u003bsecret={u3b_sec}"}}',
+            f'{{"msg":"a\\u003dNSC_TOKEN={u3d_nsc_tok}\\u002bauthorization: Bearer {u2b_bearer}"}}',
+            '{"msg":"literal:\\\\u003bpassword=keep_literal"}',
+            '{"msg":"a\\u0062password=keep_bpass \\u0066password=keep_fpass"}',
+            f'https://example.invalid/cb?foo=1&passphrase={q_pp}&password={q_pw}&bar=2',
+            f'{{"cb":"https://example.invalid/cb?foo=1&passphrase={q_pp}&password={q_pw}&bar=2"}}',
+        ]
+
+        events = [
+            json.dumps({
+                "Time": "2026-11-20T00:00:00Z",
+                "Action": "output",
+                "Package": "github.com/bsuv/terraform-provider-namespace/internal/provider",
+                "Test": "TestAccAuth_LowercaseHexBFAndQueryPassphrase",
+                "Output": "\n".join(raw_lines) + "\n",
+            }),
+        ]
+        log_input = f"{build_valid_matrix_log()}\n" + "\n".join(events)
+        proc, report_md, sanitized_log = self.run_generator(log_input)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for secret in [
+            raw_jwt,
+            u3b_nsrt,
+            u2f_oidc,
+            u3f_pw,
+            u3b_sec,
+            u3d_nsc_tok,
+            u2b_bearer,
+            q_pp,
+            q_pw,
+        ]:
+            self.assertNotIn(secret, sanitized_log)
+            self.assertNotIn(secret, report_md)
+
+        parsed_outputs = []
+        for line in sanitized_log.strip().splitlines():
+            ev = json.loads(line)
+            if ev.get("Test") == "TestAccAuth_LowercaseHexBFAndQueryPassphrase" and "Output" in ev:
+                parsed_outputs.extend(ev["Output"].splitlines())
+
+        expected_outputs = [
+            '{"msg":"a\\u003b[REDACTED_TOKEN]"}',
+            '{"msg":"a\\u002f[REDACTED_JWT]"}',
+            '{"msg":"a\\u003fpassword=[REDACTED_PASSWORD]"}',
+            '{"msg":"a\\u003bsecret=[REDACTED_SECRET]"}',
+            '{"msg":"a\\u003dNSC_TOKEN=[REDACTED]\\u002bauthorization: Bearer [REDACTED_TOKEN]"}',
+            '{"msg":"literal:\\\\u003bpassword=keep_literal"}',
+            '{"msg":"a\\u0062password=keep_bpass \\u0066password=keep_fpass"}',
+            'https://example.invalid/cb?foo=1&passphrase=[REDACTED]&password=[REDACTED_PASSWORD]&bar=2',
+            '{"cb":"https://example.invalid/cb?foo=1&passphrase=[REDACTED]&password=[REDACTED_PASSWORD]&bar=2"}',
+        ]
+        for want in expected_outputs:
+            self.assertIn(want, parsed_outputs)
+
+        for out_line in parsed_outputs:
+            if out_line.startswith("{"):
+                json.loads(out_line)
+
+        proc2, _, sanitized_log2 = self.run_generator(sanitized_log)
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertEqual(sanitized_log2, sanitized_log)
+
 
 if __name__ == "__main__":
     unittest.main()

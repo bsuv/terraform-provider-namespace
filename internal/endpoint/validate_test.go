@@ -1,6 +1,7 @@
 package endpoint_test
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -155,6 +156,10 @@ func TestIsTrustedHost(t *testing.T) {
 		"https://global.namespaceapis.com:443",
 		"https://eu.compute.namespaceapis.com:443",
 		"https://namespaceapis.com",
+		"https://compute.namespaceapi.com",
+		"https://turbo.cache.namespaceapi.com:443",
+		"https://namespaceapi.com",
+		"COMPUTE.NAMESPACEAPI.COM",
 		"https://api.namespace.so",
 		"https://namespace.so:443",
 		"https://registry.namespacelabs.dev",
@@ -183,6 +188,8 @@ func TestIsTrustedHost(t *testing.T) {
 		"https://proxy.corp.example:443",
 		"https://evil-namespaceapis.com",
 		"https://namespaceapis.com.evil.com",
+		"https://evil-namespaceapi.com",
+		"https://namespaceapi.com.evil.com",
 		"https://evilnamespace.so",
 		"https://namespacelabs.dev.attacker.invalid",
 		"https://10.0.0.1:443",
@@ -197,5 +204,64 @@ func TestIsTrustedHost(t *testing.T) {
 				t.Errorf("expected %q NOT to be trusted", ep)
 			}
 		})
+	}
+}
+
+func TestValidateHost_And_ValidateIP(t *testing.T) {
+	t.Parallel()
+
+	for _, okHost := range []string{
+		"global.namespaceapis.com",
+		"127.0.0.1",
+		"::1",
+		"203.0.113.10",
+	} {
+		if err := endpoint.ValidateHost(okHost); err != nil {
+			t.Errorf("ValidateHost(%q) unexpected error: %v", okHost, err)
+		}
+	}
+
+	for _, badHost := range []string{
+		"",
+		"   ",
+		"0.0.0.0",
+		"169.254.169.254",
+		"fe80::1",
+		"fd00:ec2::254",
+		"100.100.100.200",
+		"metadata.google.internal",
+		"0xa9fea9fe",
+		"passthrough",
+	} {
+		if err := endpoint.ValidateHost(badHost); err == nil {
+			t.Errorf("ValidateHost(%q) expected error, got nil", badHost)
+		}
+	}
+
+	for _, okIP := range []string{"127.0.0.1", "::1", "10.0.0.5", "2001:db8::1"} {
+		addr := netip.MustParseAddr(okIP)
+		if err := endpoint.ValidateIP(addr); err != nil {
+			t.Errorf("ValidateIP(%s) unexpected error: %v", okIP, err)
+		}
+	}
+
+	if err := endpoint.ValidateIP(netip.Addr{}); err == nil {
+		t.Error("ValidateIP(invalid zero Addr) expected error, got nil")
+	}
+	for _, badIP := range []string{
+		"0.0.0.0",
+		"::",
+		"169.254.169.254",
+		"fe80::1",
+		"fd00:ec2::254",
+		"100.100.100.200",
+		"::ffff:169.254.169.254",
+		"::169.254.169.254",
+		"64:ff9b::169.254.169.254",
+	} {
+		addr := netip.MustParseAddr(badIP)
+		if err := endpoint.ValidateIP(addr); err == nil {
+			t.Errorf("ValidateIP(%s) expected error, got nil", badIP)
+		}
 	}
 }

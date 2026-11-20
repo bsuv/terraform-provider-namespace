@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	tokenKeyPattern       = `(?:token|(?:bearer|id|session|access|refresh|partner|client|auth|tenant|workload|oidc)[_-]?token|trusted[_-]?jwt|jwt)`
+	tokenKeyPattern       = `(?:token|(?:bearer|id|session|access|refresh|partner|client|auth|tenant|workload|oidc)[_-]?token|(?:nsc[_-]?)?token[_-]?spec(?:[_-]?file)?|trusted[_-]?jwt|jwt)`
 	keyFieldKeyPattern    = `(?:(?:api|client|private|signing)[_-]?key(?:[_-]?pem)?)`
 	certFieldKeyPattern   = `(?:(?:client[_-]?)?cert(?:ificate)?(?:[_-]?pem)?)`
 	secretFieldKeyPattern = `(?:client[_-]?secret|credentials?|secret)`
@@ -14,43 +14,47 @@ const (
 )
 
 var (
-	privateKeyRegex      = regexp.MustCompile(`-----BEGIN (?:[A-Z0-9_-]+ )*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )*PRIVATE KEY(?: BLOCK)?-----`)
-	certRegex            = regexp.MustCompile(`-----BEGIN (?:[A-Z0-9_-]+ )*CERTIFICATE-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )*CERTIFICATE-----`)
-	beginPrivateKeyRegex = regexp.MustCompile(`-----BEGIN (?:[A-Z0-9_-]+ )*PRIVATE KEY(?: BLOCK)?-----`)
-	beginCertRegex       = regexp.MustCompile(`-----BEGIN (?:[A-Z0-9_-]+ )*CERTIFICATE-----`)
-	pemBodyLineRegex     = regexp.MustCompile(`^(?:[A-Za-z0-9+/_\-]+={0,2}|(?:Version|Comment|Proc-Type|DEK-Info):.*)$`)
-	urlUserinfoRegex     = regexp.MustCompile(`(?i)((?:https?|grpcs?|ftp|wss?|socks5h?)://)([^\s/@?#"'<>]+)@`)
-	envVarRegex          = regexp.MustCompile(`(?i)\b(NSC_TOKEN|NSC_PARTNER_TOKEN|NSC_TRUSTED_JWT|NSC_TOKEN_FILE|CACHE_PASSWORD|GPG_PRIVATE_KEY|PASSPHRASE|TF_VAR_nsc_[A-Za-z0-9_]+)=(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\n,;{}'"]+)`)
+	privateKeyRegex            = regexp.MustCompile(`-----BEGIN (?:[A-Z0-9_-]+ )*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )*PRIVATE KEY(?: BLOCK)?-----`)
+	certRegex                  = regexp.MustCompile(`-----BEGIN (?:[A-Z0-9_-]+ )*CERTIFICATE-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )*CERTIFICATE-----`)
+	beginPrivateKeyRegex       = regexp.MustCompile(`-----BEGIN (?:[A-Z0-9_-]+ )*PRIVATE KEY(?: BLOCK)?-----`)
+	beginCertRegex             = regexp.MustCompile(`-----BEGIN (?:[A-Z0-9_-]+ )*CERTIFICATE-----`)
+	pemBodyLineRegex           = regexp.MustCompile(`^(?:[A-Za-z0-9+/_\-]+={0,2}|(?:Version|Comment|Proc-Type|DEK-Info):.*)$`)
+	urlUserinfoRegex           = regexp.MustCompile(`(?i)((?:https?|grpcs?|ftp|wss?|socks5h?)://)([^\s/@?#"'<>]+)@`)
+	tokenSpecObjectPrefixRegex = regexp.MustCompile(`(?i)((?:(\\*)(["']))?((?:TF_VAR_)?(?:nsc[_-]?)?token[_-]?spec(?:[_-]?file)?)(?:\\*["'])?[ \t]*([:=])[ \t]*)\{`)
+	redactedPlaceholderRegex   = regexp.MustCompile(`^\[REDACTED(?:[ _][A-Z_]+)*\]$`)
+	envVarObjectPrefixRegex    = regexp.MustCompile(`(?i)(NSC_TOKEN|NSC_TOKEN_SPEC_FILE|NSC_TOKEN_SPEC|NSC_PARTNER_TOKEN|NSC_TRUSTED_JWT|NSC_TOKEN_FILE|CACHE_PASSWORD|GPG_PRIVATE_KEY|PASSPHRASE|TF_VAR_nsc_[A-Za-z0-9_]+)=\{`)
+	envVarRegex                = regexp.MustCompile(`(?i)(NSC_TOKEN|NSC_TOKEN_SPEC_FILE|NSC_TOKEN_SPEC|NSC_PARTNER_TOKEN|NSC_TRUSTED_JWT|NSC_TOKEN_FILE|CACHE_PASSWORD|GPG_PRIVATE_KEY|PASSPHRASE|TF_VAR_nsc_[A-Za-z0-9_]+)=(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s\n,;{}'"\\&]*)?|[^\s\n,;{}'"\\&]+)`)
 
-	mdAuthHeaderRegex         = regexp.MustCompile(`(?i)(\bauthorization:\s*\[)(bearer|basic)(\s+)(?:\[REDACTED (?:TOKEN|SECRET)\]|[^\]\r\n]+)(\])`)
-	authArrayPrefixRegex      = regexp.MustCompile(`(?i)((?:\\*["'])authorization(?:\\*["'])[ \t]*:[ \t]*\[)`)
-	authHeaderRegex           = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*bearer\s+)(?:\[REDACTED TOKEN\]|[^\s,;{}\]]+)`)
-	basicAuthorizationRegex   = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*basic\s+)(?:\[REDACTED SECRET\]|[^\r\n,;{}\]]+)`)
-	quotedAuthPrefixRegex     = compileQuotedFieldPrefix(`authorization`, true)
-	bearerValueRegex          = regexp.MustCompile(`(?i)^(bearer\s+)`)
-	basicValueRegex           = regexp.MustCompile(`(?i)^(basic\s+)`)
-	bearerTokenRegex          = regexp.MustCompile(`(?i)\b(bearer\s+)(?:\[REDACTED TOKEN\]|[a-zA-Z0-9_\-\.+/=]{20,})`)
-	nsTokenRegex              = regexp.MustCompile(`\b(?:nsct_|nscw_|nscu_|tok_|st_)[a-zA-Z0-9_\-\.]+`)
-	jwtRegex                  = regexp.MustCompile(`\beyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+`)
-	quotedPassPrefixRegex     = compileQuotedFieldPrefix(passFieldKeyPattern, false)
-	unquotedPassRegex         = regexp.MustCompile(`(?i)\b(` + passFieldKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED PASSWORD\]|[^\s,;{}'"]+)`)
-	quotedTokenPrefixRegex    = compileQuotedFieldPrefix(tokenKeyPattern, false)
-	unquotedTokenFieldRegex   = regexp.MustCompile(`(?i)\b(` + tokenKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED (?:TOKEN|JWT)\]|[^\s,;{}'"&]+)`)
-	quotedKeyPrefixRegex      = compileQuotedFieldPrefix(keyFieldKeyPattern, false)
-	unquotedKeyFieldRegex     = regexp.MustCompile(`(?i)\b(` + keyFieldKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED PRIVATE KEY\]|[^\s,;{}'"&]+)`)
-	quotedCertPrefixRegex     = compileQuotedFieldPrefix(certFieldKeyPattern, false)
-	unquotedCertFieldRegex    = regexp.MustCompile(`(?i)\b(` + certFieldKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED CERTIFICATE\]|[^\s,;{}'"&]+)`)
-	quotedSecretPrefixRegex   = compileQuotedFieldPrefix(secretFieldKeyPattern, false)
-	unquotedSecretFieldRegex  = regexp.MustCompile(`(?i)\b(` + secretFieldKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED SECRET\]|[^\s,;{}'"&]+)`)
-	quotedUsernamePrefixRegex = compileQuotedFieldPrefix(`username`, false)
-	unquotedUsernameRegex     = regexp.MustCompile(`(?i)\b(username[ \t]*[:=][ \t]*)(?:\[REDACTED SECRET\]|[^\s,;{}'"&]+)`)
+	mdAuthHeaderRegex           = regexp.MustCompile(`(?i)(authorization:\s*\[)(bearer|basic)(\s+)(?:\[REDACTED(?:[ _][A-Z_]+)*\]|[^\]\r\n]+)(\])`)
+	authArrayPrefixRegex        = regexp.MustCompile(`(?i)((?:\\*["'])authorization(?:\\*["'])[ \t]*:[ \t]*\[)`)
+	authHeaderRegex             = regexp.MustCompile(`(?i)(authorization\s*[:=]\s*bearer\s+)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}'"\\&\]]*)?|[^\s,;{}'"\\&\]]+)`)
+	basicAuthorizationRegex     = regexp.MustCompile(`(?i)(authorization\s*[:=]\s*basic\s+)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\r\n,;{}'"\\&\]]*)?|[^\r\n,;{}'"\\&\]]+)`)
+	quotedAuthPrefixRegex       = compileQuotedFieldPrefix(`authorization`, true)
+	quotedAuthSchemePrefixRegex = compileQuotedFieldPrefix(`authorization`, false)
+	bearerValueRegex            = regexp.MustCompile(`(?i)^(bearer\s+)`)
+	basicValueRegex             = regexp.MustCompile(`(?i)^(basic\s+)`)
+	bearerTokenRegex            = regexp.MustCompile(`(?i)(bearer\s+)(?:\[REDACTED(?:[ _][A-Z_]+)*\]|[a-zA-Z0-9_\-\.+/=]{20,})`)
+	nsTokenRegex                = regexp.MustCompile(`(?:nsct_|nscw_|nscu_|nsrt_|tok_|st_)(?:eyJ[a-zA-Z0-9_\-]+={0,2}\.[a-zA-Z0-9_\-]+={0,2}\.[a-zA-Z0-9_\-]+={0,2}|[a-zA-Z0-9_\-\.]+={0,2})`)
+	jwtRegex                    = regexp.MustCompile(`(?:[A-Za-z0-9_-]+_)?eyJ[a-zA-Z0-9_\-]+={0,2}\.[a-zA-Z0-9_\-]+={0,2}\.[a-zA-Z0-9_\-]+={0,2}`)
+	quotedPassPrefixRegex       = compileQuotedFieldPrefix(passFieldKeyPattern, false)
+	unquotedPassRegex           = regexp.MustCompile(`(?i)(` + passFieldKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}'"\\&]*)?|[^\s,;{}'"\\&]+)`)
+	quotedTokenPrefixRegex      = compileQuotedFieldPrefix(tokenKeyPattern, false)
+	unquotedTokenFieldRegex     = regexp.MustCompile(`(?i)(` + tokenKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}'"\\&]*)?|[^\s,;{}'"\\&]+)`)
+	quotedKeyPrefixRegex        = compileQuotedFieldPrefix(keyFieldKeyPattern, false)
+	unquotedKeyFieldRegex       = regexp.MustCompile(`(?i)(` + keyFieldKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}'"\\&]*)?|[^\s,;{}'"\\&]+)`)
+	quotedCertPrefixRegex       = compileQuotedFieldPrefix(certFieldKeyPattern, false)
+	unquotedCertFieldRegex      = regexp.MustCompile(`(?i)(` + certFieldKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}'"\\&]*)?|[^\s,;{}'"\\&]+)`)
+	quotedSecretPrefixRegex     = compileQuotedFieldPrefix(secretFieldKeyPattern, false)
+	unquotedSecretFieldRegex    = regexp.MustCompile(`(?i)(` + secretFieldKeyPattern + `[ \t]*[:=][ \t]*)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}'"\\&]*)?|[^\s,;{}'"\\&]+)`)
+	quotedUsernamePrefixRegex   = compileQuotedFieldPrefix(`username`, false)
+	unquotedUsernameRegex       = regexp.MustCompile(`(?i)(username[ \t]*[:=][ \t]*)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}'"\\&]*)?|[^\s,;{}'"\\&]+)`)
 )
 
 func compileQuotedFieldPrefix(keyPattern string, requireQuotedKey bool) *regexp.Regexp {
 	if requireQuotedKey {
-		return regexp.MustCompile(`(?i)((?:\\*["'])` + keyPattern + `(?:\\*["'])[ \t]*[:=][ \t]*)(\\*)(["'])`)
+		return regexp.MustCompile(`(?i)((?:\\*["'])(` + keyPattern + `)(?:\\*["'])[ \t]*[:=][ \t]*)(\\*)(["'])`)
 	}
-	return regexp.MustCompile(`(?i)((?:\\*["'])?(?:` + keyPattern + `)(?:\\*["'])?[ \t]*[:=][ \t]*)(\\*)(["'])`)
+	return regexp.MustCompile(`(?i)((?:\\*["'])?(` + keyPattern + `)(?:\\*["'])?[ \t]*[:=][ \t]*)(\\*)(["'])`)
 }
 
 // Secrets removes sensitive data (tokens, JWTs, private keys, certificates, passwords,
@@ -61,25 +65,27 @@ func Secrets(msg string) string {
 	msg = redactTruncatedPEM(msg, beginPrivateKeyRegex, "[REDACTED PRIVATE KEY]")
 	msg = redactTruncatedPEM(msg, beginCertRegex, "[REDACTED CERTIFICATE]")
 	msg = urlUserinfoRegex.ReplaceAllString(msg, "${1}[REDACTED CREDENTIALS]@")
-	msg = envVarRegex.ReplaceAllString(msg, "${1}=[REDACTED]")
+	msg = redactTokenSpecObjects(msg)
+	msg = redactEnvVars(msg)
 	msg = redactAuthArrays(msg)
 	msg = redactMDAuthHeaders(msg)
-	msg = authHeaderRegex.ReplaceAllString(msg, "${1}[REDACTED TOKEN]")
-	msg = basicAuthorizationRegex.ReplaceAllString(msg, "${1}[REDACTED SECRET]")
+	msg = replacePrefixWithBoundary(msg, authHeaderRegex, "[REDACTED TOKEN]")
+	msg = replacePrefixWithBoundary(msg, basicAuthorizationRegex, "[REDACTED SECRET]")
 	msg = redactQuotedFields(msg, quotedAuthPrefixRegex, redactAuthValue)
-	msg = bearerTokenRegex.ReplaceAllString(msg, "${1}[REDACTED TOKEN]")
-	msg = nsTokenRegex.ReplaceAllString(msg, "[REDACTED TOKEN]")
-	msg = jwtRegex.ReplaceAllString(msg, "[REDACTED JWT]")
+	msg = redactQuotedFields(msg, quotedAuthSchemePrefixRegex, redactAuthSchemeValue)
+	msg = replacePrefixWithBoundary(msg, bearerTokenRegex, "[REDACTED TOKEN]")
+	msg = replaceConstantWithBoundary(msg, nsTokenRegex, "[REDACTED TOKEN]")
+	msg = replaceConstantWithBoundary(msg, jwtRegex, "[REDACTED JWT]")
 	msg = redactQuotedFields(msg, quotedPassPrefixRegex, constantRedaction("[REDACTED PASSWORD]"))
-	msg = unquotedPassRegex.ReplaceAllString(msg, "${1}[REDACTED PASSWORD]")
+	msg = replacePrefixWithBoundary(msg, unquotedPassRegex, "[REDACTED PASSWORD]")
 	msg = redactQuotedFields(msg, quotedTokenPrefixRegex, redactQuotedTokenValue)
 	msg = redactUnquotedTokenFields(msg)
 	msg = redactQuotedFields(msg, quotedKeyPrefixRegex, constantRedaction("[REDACTED PRIVATE KEY]"))
-	msg = unquotedKeyFieldRegex.ReplaceAllString(msg, "${1}[REDACTED PRIVATE KEY]")
+	msg = replacePrefixWithBoundary(msg, unquotedKeyFieldRegex, "[REDACTED PRIVATE KEY]")
 	msg = redactQuotedFields(msg, quotedCertPrefixRegex, constantRedaction("[REDACTED CERTIFICATE]"))
-	msg = unquotedCertFieldRegex.ReplaceAllString(msg, "${1}[REDACTED CERTIFICATE]")
+	msg = replacePrefixWithBoundary(msg, unquotedCertFieldRegex, "[REDACTED CERTIFICATE]")
 	msg = redactQuotedFields(msg, quotedSecretPrefixRegex, constantRedaction("[REDACTED SECRET]"))
-	msg = unquotedSecretFieldRegex.ReplaceAllString(msg, "${1}[REDACTED SECRET]")
+	msg = replacePrefixWithBoundary(msg, unquotedSecretFieldRegex, "[REDACTED SECRET]")
 	return msg
 }
 
@@ -87,8 +93,152 @@ func Secrets(msg string) string {
 // payloads (such as cache credential responses where username is schema-sensitive).
 func CredentialUsernames(msg string) string {
 	msg = redactQuotedFields(msg, quotedUsernamePrefixRegex, constantRedaction("[REDACTED SECRET]"))
-	msg = unquotedUsernameRegex.ReplaceAllString(msg, "${1}[REDACTED SECRET]")
+	msg = replacePrefixWithBoundary(msg, unquotedUsernameRegex, "[REDACTED SECRET]")
 	return msg
+}
+
+func isWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+func precedingBackslashCount(s string, idx int) int {
+	count := 0
+	for i := idx - 1; i >= 0 && s[i] == '\\'; i-- {
+		count++
+	}
+	return count
+}
+
+func hexVal(b byte) (int, bool) {
+	switch {
+	case b >= '0' && b <= '9':
+		return int(b - '0'), true
+	case b >= 'a' && b <= 'f':
+		return int(b-'a') + 10, true
+	case b >= 'A' && b <= 'F':
+		return int(b-'A') + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func parseHex4(s string) (uint16, bool) {
+	if len(s) != 4 {
+		return 0, false
+	}
+	var val uint16
+	for i := 0; i < 4; i++ {
+		d, ok := hexVal(s[i])
+		if !ok {
+			return 0, false
+		}
+		val = (val << 4) | uint16(d)
+	}
+	return val, true
+}
+
+func isJSONEscapeStartAt(s string, idx int) bool {
+	if idx < 1 || idx >= len(s) {
+		return false
+	}
+	switch s[idx] {
+	case 'n', 'r', 't', 'b', 'f':
+		return precedingBackslashCount(s, idx)%2 == 1
+	case 'u':
+		if idx+4 >= len(s) || precedingBackslashCount(s, idx)%2 != 1 {
+			return false
+		}
+		_, ok := parseHex4(s[idx+1 : idx+5])
+		return ok
+	default:
+		return false
+	}
+}
+
+func isJSONEscapeEndAt(s string, idx int) bool {
+	if idx < 1 || idx >= len(s) {
+		return false
+	}
+	switch s[idx] {
+	case 'n', 'r', 't', 'b', 'f':
+		if precedingBackslashCount(s, idx)%2 == 1 {
+			return true
+		}
+	}
+	if idx >= 5 && s[idx-4] == 'u' && precedingBackslashCount(s, idx-4)%2 == 1 {
+		if cp, ok := parseHex4(s[idx-3 : idx+1]); ok {
+			if cp < 128 {
+				return !isWordByte(byte(cp))
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// isJSONEscapeWordBoundary reports whether idx in s is a valid leading word boundary,
+// treating JSON escape sequences (\n, \r, \t, \b, \f, and non-word \uXXXX) as
+// boundaries while never treating the escape letter itself as a leading word character.
+func isJSONEscapeWordBoundary(s string, idx int) bool {
+	if idx < 0 || idx > len(s) {
+		return false
+	}
+	if idx < len(s) && isJSONEscapeStartAt(s, idx) {
+		return false
+	}
+	if idx == 0 {
+		return true
+	}
+	if !isWordByte(s[idx-1]) {
+		return true
+	}
+	return isJSONEscapeEndAt(s, idx-1)
+}
+
+func replaceAllWithBoundary(msg string, re *regexp.Regexp, fn func(msg string, pos int, loc []int) string) string {
+	var out strings.Builder
+	pos := 0
+	for pos < len(msg) {
+		loc := re.FindStringSubmatchIndex(msg[pos:])
+		if loc == nil {
+			out.WriteString(msg[pos:])
+			break
+		}
+		matchStart := pos + loc[0]
+		matchEnd := pos + loc[1]
+		if !isJSONEscapeWordBoundary(msg, matchStart) {
+			nextPos := matchStart + 1
+			if nextPos <= pos {
+				nextPos = pos + 1
+			}
+			out.WriteString(msg[pos:nextPos])
+			pos = nextPos
+			continue
+		}
+		out.WriteString(msg[pos:matchStart])
+		out.WriteString(fn(msg, pos, loc))
+		if matchEnd <= pos {
+			pos++
+		} else {
+			pos = matchEnd
+		}
+	}
+	return out.String()
+}
+
+func replacePrefixWithBoundary(msg string, re *regexp.Regexp, marker string) string {
+	return replaceAllWithBoundary(msg, re, func(s string, pos int, loc []int) string {
+		if len(loc) < 4 || loc[2] == -1 || loc[3] == -1 {
+			return marker
+		}
+		return s[pos+loc[2]:pos+loc[3]] + marker
+	})
+}
+
+func replaceConstantWithBoundary(msg string, re *regexp.Regexp, marker string) string {
+	return replaceAllWithBoundary(msg, re, func(string, int, []int) string {
+		return marker
+	})
 }
 
 func redactTruncatedPEM(msg string, beginRe *regexp.Regexp, marker string) string {
@@ -166,23 +316,37 @@ func redactAuthValue(val string) string {
 	return "[REDACTED TOKEN]"
 }
 
+func redactAuthSchemeValue(val string) string {
+	if scheme := bearerValueRegex.FindStringSubmatch(val); len(scheme) == 2 {
+		return scheme[1] + "[REDACTED TOKEN]"
+	}
+	if scheme := basicValueRegex.FindStringSubmatch(val); len(scheme) == 2 {
+		return scheme[1] + "[REDACTED SECRET]"
+	}
+	return val
+}
+
 func redactQuotedTokenValue(val string) string {
-	if strings.TrimSpace(val) == "[REDACTED JWT]" {
+	trimmed := strings.TrimSpace(val)
+	if redactedPlaceholderRegex.MatchString(trimmed) {
 		return val
 	}
 	return "[REDACTED TOKEN]"
 }
 
 func redactMDAuthHeaders(msg string) string {
-	return mdAuthHeaderRegex.ReplaceAllStringFunc(msg, func(match string) string {
-		parts := mdAuthHeaderRegex.FindStringSubmatch(match)
-		if len(parts) != 5 {
+	return replaceAllWithBoundary(msg, mdAuthHeaderRegex, func(s string, pos int, loc []int) string {
+		if len(loc) < 10 {
 			return "[REDACTED TOKEN]"
 		}
-		if strings.EqualFold(parts[2], "basic") {
-			return parts[1] + parts[2] + parts[3] + "[REDACTED SECRET]" + parts[4]
+		p1 := s[pos+loc[2] : pos+loc[3]]
+		p2 := s[pos+loc[4] : pos+loc[5]]
+		p3 := s[pos+loc[6] : pos+loc[7]]
+		p4 := s[pos+loc[8] : pos+loc[9]]
+		if strings.EqualFold(p2, "basic") {
+			return p1 + p2 + p3 + "[REDACTED SECRET]" + p4
 		}
-		return parts[1] + parts[2] + parts[3] + "[REDACTED TOKEN]" + parts[4]
+		return p1 + p2 + p3 + "[REDACTED TOKEN]" + p4
 	})
 }
 
@@ -255,9 +419,19 @@ func redactQuotedFields(msg string, prefixRegex *regexp.Regexp, transform func(s
 			break
 		}
 		matchStart := pos + loc[0]
+		keyStart := pos + loc[4]
+		if !isJSONEscapeWordBoundary(msg, keyStart) {
+			nextPos := keyStart + 1
+			if nextPos <= pos {
+				nextPos = pos + 1
+			}
+			out.WriteString(msg[pos:nextPos])
+			pos = nextPos
+			continue
+		}
 		valStart := pos + loc[1]
-		bsLen := loc[5] - loc[4]
-		quote := msg[pos+loc[6]]
+		bsLen := loc[7] - loc[6]
+		quote := msg[pos+loc[8]]
 
 		valEnd, closeEnd, ok := scanQuotedValueEnd(msg, valStart, bsLen, quote)
 		if !ok {
@@ -315,14 +489,217 @@ func scanQuotedValueEnd(s string, start int, bsLen int, quote byte) (int, int, b
 	return 0, 0, false
 }
 
+func redactEnvVars(msg string) string {
+	msg = redactEnvVarObjects(msg)
+	return replaceAllWithBoundary(msg, envVarRegex, func(s string, pos int, loc []int) string {
+		if len(loc) < 4 || loc[2] == -1 || loc[3] == -1 {
+			return "[REDACTED]"
+		}
+		match := s[pos+loc[0] : pos+loc[1]]
+		key := s[pos+loc[2] : pos+loc[3]]
+		val := strings.TrimPrefix(match, key+"=")
+		if redactedPlaceholderRegex.MatchString(val) {
+			return match
+		}
+		return key + "=[REDACTED]"
+	})
+}
+
+func redactEnvVarObjects(msg string) string {
+	var out strings.Builder
+	pos := 0
+	for pos < len(msg) {
+		loc := envVarObjectPrefixRegex.FindStringSubmatchIndex(msg[pos:])
+		if loc == nil {
+			out.WriteString(msg[pos:])
+			break
+		}
+		keyStart := pos + loc[2]
+		if !isJSONEscapeWordBoundary(msg, keyStart) {
+			nextPos := keyStart + 1
+			if nextPos <= pos {
+				nextPos = pos + 1
+			}
+			out.WriteString(msg[pos:nextPos])
+			pos = nextPos
+			continue
+		}
+		keyEnd := pos + loc[3]
+		braceIdx := pos + loc[1] - 1
+
+		objEnd, ok := scanBalancedJSONObjectEnd(msg, braceIdx, 0)
+		if !ok {
+			out.WriteString(msg[pos : braceIdx+1])
+			pos = braceIdx + 1
+			continue
+		}
+
+		out.WriteString(msg[pos:keyStart])
+		out.WriteString(msg[keyStart:keyEnd])
+		out.WriteString("=[REDACTED]")
+		pos = objEnd
+	}
+	return out.String()
+}
+
+func redactTokenSpecObjects(msg string) string {
+	var out strings.Builder
+	pos := 0
+	for pos < len(msg) {
+		loc := tokenSpecObjectPrefixRegex.FindStringSubmatchIndex(msg[pos:])
+		if loc == nil {
+			out.WriteString(msg[pos:])
+			break
+		}
+		keyStart := pos + loc[8]
+		if !isJSONEscapeWordBoundary(msg, keyStart) {
+			nextPos := keyStart + 1
+			if nextPos <= pos {
+				nextPos = pos + 1
+			}
+			out.WriteString(msg[pos:nextPos])
+			pos = nextPos
+			continue
+		}
+		prefixStart := pos + loc[2]
+		prefixEnd := pos + loc[3]
+		braceIdx := pos + loc[1] - 1
+
+		bsLen := 0
+		bs := ""
+		if loc[4] != -1 && loc[5] != -1 {
+			bsLen = loc[5] - loc[4]
+			bs = msg[pos+loc[4] : pos+loc[5]]
+		}
+		quote := ""
+		if loc[6] != -1 && loc[7] != -1 {
+			quote = msg[pos+loc[6] : pos+loc[7]]
+		}
+		sep := msg[pos+loc[10] : pos+loc[11]]
+
+		objEnd, ok := scanBalancedJSONObjectEnd(msg, braceIdx, bsLen)
+		if !ok {
+			out.WriteString(msg[pos : braceIdx+1])
+			pos = braceIdx + 1
+			continue
+		}
+
+		out.WriteString(msg[pos:prefixStart])
+		out.WriteString(msg[prefixStart:prefixEnd])
+		if sep == "=" {
+			out.WriteString("[REDACTED]")
+		} else {
+			q := quote
+			if q == "" {
+				q = `"`
+			}
+			out.WriteString(bs + q + "[REDACTED TOKEN]" + bs + q)
+		}
+		pos = objEnd
+	}
+	return out.String()
+}
+
+// scanBalancedJSONObjectEnd scans forward from braceIdx ('{') on the same line to
+// find the matching '}' while respecting JSON string literals and escapes.
+func scanBalancedJSONObjectEnd(s string, braceIdx int, bsLen int) (int, bool) {
+	if braceIdx >= len(s) || s[braceIdx] != '{' {
+		return 0, false
+	}
+	if bsLen == 0 {
+		k := braceIdx + 1
+		for k < len(s) {
+			if s[k] == ' ' || s[k] == '\t' {
+				k++
+				continue
+			}
+			if s[k] == '\\' {
+				bStart := k
+				for k < len(s) && s[k] == '\\' {
+					k++
+				}
+				if k < len(s) && (s[k] == 'n' || s[k] == 'r' || s[k] == 't' || s[k] == 'b' || s[k] == 'f') {
+					k++
+					continue
+				}
+				if k < len(s) && (s[k] == '"' || s[k] == '\'') {
+					bsLen = k - bStart
+				}
+				break
+			}
+			break
+		}
+	}
+	step := 2 * (bsLen + 1)
+	depth := 1
+	var strQuote byte
+	for i := braceIdx + 1; i < len(s); {
+		ch := s[i]
+		if ch == '\r' || ch == '\n' {
+			return 0, false
+		}
+		if ch == '\\' {
+			bStart := i
+			for i < len(s) && s[i] == '\\' {
+				i++
+			}
+			bCount := i - bStart
+			if i < len(s) && (s[i] == '"' || s[i] == '\'') {
+				q := s[i]
+				if strQuote != 0 && bCount < bsLen && q == strQuote {
+					return 0, false
+				}
+				if bCount >= bsLen && (bCount-bsLen)%step == 0 {
+					switch strQuote {
+					case 0:
+						strQuote = q
+					case q:
+						strQuote = 0
+					}
+				}
+				i++
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			if bsLen == 0 {
+				switch strQuote {
+				case 0:
+					strQuote = ch
+				case ch:
+					strQuote = 0
+				}
+			} else if strQuote == ch || (strQuote == 0 && ch == '"') {
+				return 0, false
+			}
+			i++
+			continue
+		}
+		if strQuote == 0 {
+			switch ch {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					return i + 1, true
+				}
+			}
+		}
+		i++
+	}
+	return 0, false
+}
+
 func redactUnquotedTokenFields(msg string) string {
-	return unquotedTokenFieldRegex.ReplaceAllStringFunc(msg, func(match string) string {
-		parts := unquotedTokenFieldRegex.FindStringSubmatch(match)
-		if len(parts) < 2 {
+	return replaceAllWithBoundary(msg, unquotedTokenFieldRegex, func(s string, pos int, loc []int) string {
+		if len(loc) < 4 || loc[2] == -1 || loc[3] == -1 {
 			return "[REDACTED TOKEN]"
 		}
-		val := strings.TrimSpace(strings.TrimPrefix(match, parts[1]))
-		if val == "[REDACTED JWT]" {
+		match := s[pos+loc[0] : pos+loc[1]]
+		prefix := s[pos+loc[2] : pos+loc[3]]
+		val := strings.TrimSpace(strings.TrimPrefix(match, prefix))
+		if redactedPlaceholderRegex.MatchString(val) {
 			return match
 		}
 		// A diagnostic such as "JWT: Bearer <token>" uses JWT as a label and
@@ -331,6 +708,6 @@ func redactUnquotedTokenFields(msg string) string {
 		if strings.EqualFold(val, "bearer") {
 			return match
 		}
-		return parts[1] + "[REDACTED TOKEN]"
+		return prefix + "[REDACTED TOKEN]"
 	})
 }

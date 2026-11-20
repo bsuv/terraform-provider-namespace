@@ -14,7 +14,9 @@ import (
 	githubv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/github/v1beta"
 	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
 	registryv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/registry/v1beta"
+	stdlib "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/stdlib"
 
+	"github.com/bsuv/terraform-provider-namespace/internal/client"
 	"github.com/bsuv/terraform-provider-namespace/internal/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -22,11 +24,11 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/emptypb"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func init() {
-	grpcapi.RequireTransportSecurity = false
+	client.RequireTransportSecurity = false
 }
 
 // TestMockServer_AllFiveServicesConcurrent calls all methods across all 5 mock services
@@ -579,5 +581,233 @@ func assertUnimplemented(t *testing.T, methodName string, err error) {
 	st, ok := status.FromError(err)
 	if !ok || st.Code() != codes.Unimplemented {
 		t.Errorf("%s: expected code Unimplemented, got %v", methodName, err)
+	}
+}
+
+func TestMockServer_StatefulProfiles_CustomPermissionsAndValidation(t *testing.T) {
+	srv := testutil.NewMockServer()
+	srv.Profile.EnableStatefulProfiles()
+	srv.Start()
+	defer srv.Stop()
+
+	ctx := context.Background()
+	conn, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithContextDialer(srv.Dialer()),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("failed to dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	profClient := githubv1betagrpc.NewProfileServiceClient(conn)
+
+	// Invalid access level rejected
+	_, err = profClient.CreateProfile(ctx, &githubv1beta.CreateProfileRequest{
+		Spec: &githubv1beta.RunnerProfileSpec{
+			Tag:         "bad-al",
+			AccessLevel: githubv1beta.AccessLevel(99),
+		},
+	})
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument for unknown AccessLevel, got %v", err)
+	}
+
+	// Invalid empty ResourceType in CustomPermissions rejected
+	_, err = profClient.CreateProfile(ctx, &githubv1beta.CreateProfileRequest{
+		Spec: &githubv1beta.RunnerProfileSpec{
+			Tag:         "bad-perm",
+			AccessLevel: githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM,
+			CustomPermissions: []*iamv1beta.Permission{
+				{ResourceType: "", ResourceId: "abc", Actions: []string{"read"}},
+			},
+		},
+	})
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument for empty ResourceType, got %v", err)
+	}
+
+	// Valid ACCESS_LEVEL_CUSTOM + CustomPermissions + deep-copy isolation
+	createReq := &githubv1beta.CreateProfileRequest{
+		Spec: &githubv1beta.RunnerProfileSpec{
+			Tag:         "custom-prof",
+			Os:          "ubuntu-24.04",
+			AccessLevel: githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM,
+			CustomPermissions: []*iamv1beta.Permission{
+				{ResourceType: "vault/object", ResourceId: "", Actions: []string{"read"}},
+			},
+		},
+	}
+	created, err := profClient.CreateProfile(ctx, createReq)
+	if err != nil {
+		t.Fatalf("CreateProfile failed: %v", err)
+	}
+	if created.GetProfile().GetVersion() != 1 || created.GetProfile().GetSpec().GetAccessLevel() != githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM {
+		t.Fatalf("unexpected created profile: %+v", created.GetProfile())
+	}
+
+	// Mutate caller-side response/request slices and verify server state is isolated
+	createReq.Spec.CustomPermissions[0].Actions[0] = "mutated"
+	created.Profile.Spec.CustomPermissions[0].ResourceType = "mutated"
+
+	listed, err := profClient.ListProfiles(ctx, &emptypb.Empty{})
+	if err != nil || len(listed.GetProfiles()) != 1 {
+		t.Fatalf("ListProfiles failed: err=%v, profiles=%d", err, len(listed.GetProfiles()))
+	}
+	gotPerm := listed.GetProfiles()[0].GetSpec().GetCustomPermissions()[0]
+	if gotPerm.GetResourceType() != "vault/object" || len(gotPerm.GetActions()) != 1 || gotPerm.GetActions()[0] != "read" {
+		t.Fatalf("server state was mutated via shared pointer: %+v", gotPerm)
+	}
+
+	// Version conflict on UpdateProfile
+	_, err = profClient.UpdateProfile(ctx, &githubv1beta.UpdateProfileRequest{
+		ProfileId:     created.GetProfile().GetProfileId(),
+		UpdateVersion: 99,
+		Spec:          &githubv1beta.RunnerProfileSpec{Tag: "custom-prof"},
+	})
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition on version mismatch, got %v", err)
+	}
+
+	// Valid UpdateProfile
+	updated, err := profClient.UpdateProfile(ctx, &githubv1beta.UpdateProfileRequest{
+		ProfileId:     created.GetProfile().GetProfileId(),
+		UpdateVersion: 1,
+		Spec: &githubv1beta.RunnerProfileSpec{
+			Tag:         "custom-prof",
+			AccessLevel: githubv1beta.AccessLevel_ACCESS_LEVEL_LIMITED,
+		},
+	})
+	if err != nil || updated.GetProfile().GetVersion() != 2 || len(updated.GetProfile().GetSpec().GetCustomPermissions()) != 0 {
+		t.Fatalf("UpdateProfile failed: err=%v, profile=%+v", err, updated.GetProfile())
+	}
+
+	// DeleteProfile
+	if _, err := profClient.DeleteProfile(ctx, &githubv1beta.DeleteProfileRequest{ProfileId: created.GetProfile().GetProfileId()}); err != nil {
+		t.Fatalf("DeleteProfile failed: %v", err)
+	}
+	listedAfter, err := profClient.ListProfiles(ctx, &emptypb.Empty{})
+	if err != nil || len(listedAfter.GetProfiles()) != 0 {
+		t.Fatalf("expected 0 profiles after delete, got err=%v len=%d", err, len(listedAfter.GetProfiles()))
+	}
+}
+
+func TestMockServer_EnableStatefulImages_ProtoSemantics(t *testing.T) {
+	srv := testutil.NewMockServer()
+	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	tAfter := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+	tBefore := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	seed := []*registryv1beta.Image{
+		{
+			Repository: "app/svc",
+			Digest:     "sha256:active-inside",
+			CreatedAt:  timestamppb.New(t0),
+			ExpiresAt:  timestamppb.New(time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)),
+			Labels:     []*stdlib.Label{{Name: "env", Value: "prod"}},
+			Tags:       []string{"v1"},
+		},
+		{
+			Repository: "app/svc",
+			Digest:     "sha256:expired-not-deleted",
+			CreatedAt:  timestamppb.New(t0),
+			ExpiresAt:  timestamppb.New(tAfter), // equal to after bound -> excluded by exclusive bound
+		},
+		{
+			Repository: "app/svc",
+			Digest:     "sha256:deleted-inside",
+			CreatedAt:  timestamppb.New(t0),
+			ExpiresAt:  timestamppb.New(time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)),
+			DeletedAt:  timestamppb.New(time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)),
+		},
+		{
+			Repository: "app/svc",
+			Digest:     "sha256:never-expires",
+			CreatedAt:  timestamppb.New(t0),
+		},
+	}
+	srv.Registry.EnableStatefulImages(seed, 1)
+	srv.Start()
+	defer srv.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithContextDialer(srv.Dialer()),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	reg := registryv1betagrpc.NewContainerRegistryServiceClient(conn)
+
+	// 1. EXCLUDE_DELETED without expires_at -> 3 images (keeps expired-not-deleted and never-expires)
+	p1, err := reg.ListImages(ctx, &registryv1beta.ListImagesRequest{
+		MatchRepository: &stdlib.StringMatcher{Values: []string{"app/svc"}, Op: stdlib.StringMatcher_IS_ANY_OF},
+		DeletionFilter:  registryv1beta.ListImagesRequest_EXCLUDE_DELETED,
+	})
+	if err != nil || len(p1.GetImages()) != 1 || len(p1.GetPaginationCursor()) == 0 {
+		t.Fatalf("unexpected page 1: err=%v len=%d cursor=%q", err, len(p1.GetImages()), p1.GetPaginationCursor())
+	}
+
+	// Continuation with mismatched DeletionFilter must return InvalidArgument
+	_, err = reg.ListImages(ctx, &registryv1beta.ListImagesRequest{
+		PaginationCursor: p1.GetPaginationCursor(),
+		DeletionFilter:   registryv1beta.ListImagesRequest_INCLUDE_DELETED,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument on mismatched continuation DeletionFilter, got %v", err)
+	}
+
+	// Continuation with UNSPECIFIED inherits original EXCLUDE_DELETED
+	p2, err := reg.ListImages(ctx, &registryv1beta.ListImagesRequest{
+		PaginationCursor: p1.GetPaginationCursor(),
+	})
+	if err != nil || len(p2.GetImages()) != 1 {
+		t.Fatalf("unexpected page 2: err=%v len=%d", err, len(p2.GetImages()))
+	}
+
+	// 2. Exclusive ExpiresAt bounds exclude never-expires and exact-boundary images (paginated with pageSize=1)
+	var winDigests []string
+	var cursor []byte
+	for {
+		winResp, err := reg.ListImages(ctx, &registryv1beta.ListImagesRequest{
+			MatchRepository:  &stdlib.StringMatcher{Values: []string{"app/svc"}, Op: stdlib.StringMatcher_IS_ANY_OF},
+			DeletionFilter:   registryv1beta.ListImagesRequest_INCLUDE_DELETED,
+			PaginationCursor: cursor,
+			ExpiresAt: &stdlib.TimestampRange{
+				After:  timestamppb.New(tAfter),
+				Before: timestamppb.New(tBefore),
+			},
+			MaxEntries: 10,
+		})
+		if err != nil {
+			t.Fatalf("expires_at ListImages failed: %v", err)
+		}
+		for _, img := range winResp.GetImages() {
+			winDigests = append(winDigests, img.GetDigest())
+		}
+		cursor = winResp.GetPaginationCursor()
+		if len(cursor) == 0 {
+			break
+		}
+	}
+	if len(winDigests) != 2 {
+		t.Fatalf("expected 2 images strictly inside expires_at window, got %d (%v)", len(winDigests), winDigests)
+	}
+
+	// 3. GetImage by tag and NotFound
+	got, err := reg.GetImage(ctx, &registryv1beta.GetImageRequest{Repository: "app/svc", Reference: "v1"})
+	if err != nil || got.GetImage().GetDigest() != "sha256:active-inside" {
+		t.Fatalf("GetImage failed: err=%v img=%+v", err, got.GetImage())
+	}
+	_, err = reg.GetImage(ctx, &registryv1beta.GetImageRequest{Repository: "app/svc", Reference: "missing"})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("expected NotFound for missing ref, got %v", err)
 	}
 }

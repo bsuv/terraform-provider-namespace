@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -118,6 +119,7 @@ ENTRYPOINT ["/bin/bash"]`
 		SwapSizeMB:            types.Int64Value(4096),
 		BuilderMode:           types.StringValue("USE_LOCAL_CACHE"),
 		AccessLevel:           types.StringValue("ACCESS_LEVEL_PERMISSIVE"),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  toTFStringList(t, []string{"nested-virt", "fast-disk"}),
 		CustomRunnerImageSpec: customSpecObj,
 		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
@@ -245,7 +247,6 @@ func TestRunnerProfile_Adversarial_CacheVolumeSettings(t *testing.T) {
 	r, schemaResp := setupTestResource(t, srv)
 
 	cv1, _ := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
-		"volume_tag":                   types.StringValue("primary-build-cache"),
 		"volume_size_gb":               types.Int64Value(200),
 		"volume_reserved_size_gb":      types.Int64Value(20),
 		"bundled_container_cache":      types.BoolValue(true),
@@ -256,7 +257,6 @@ func TestRunnerProfile_Adversarial_CacheVolumeSettings(t *testing.T) {
 		"allow_commit_from_branch":     toTFStringList(t, []string{"main", "master", "release/*", "refs/heads/prod-*"}),
 	})
 	cv2, _ := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
-		"volume_tag":                   types.StringValue("secondary-maven-cache"),
 		"volume_size_gb":               types.Int64Value(50),
 		"volume_reserved_size_gb":      types.Int64Value(0),
 		"bundled_container_cache":      types.BoolValue(false),
@@ -267,7 +267,6 @@ func TestRunnerProfile_Adversarial_CacheVolumeSettings(t *testing.T) {
 		"allow_commit_from_branch":     toTFStringList(t, []string{"*"}),
 	})
 	cv3, _ := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
-		"volume_tag":                   types.StringValue("scratch-cache"),
 		"volume_size_gb":               types.Int64Value(10),
 		"volume_reserved_size_gb":      types.Int64Value(1),
 		"bundled_container_cache":      types.BoolValue(false),
@@ -293,6 +292,7 @@ func TestRunnerProfile_Adversarial_CacheVolumeSettings(t *testing.T) {
 		SwapSizeMB:            types.Int64Value(0),
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  types.ListNull(types.StringType),
 		CacheVolumeSettings:   cacheVolumesList,
 		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
@@ -322,7 +322,7 @@ func TestRunnerProfile_Adversarial_CacheVolumeSettings(t *testing.T) {
 
 	// Verify Volume 1
 	v1 := receivedSpec.CacheVolumeSettings[0]
-	if v1.VolumeTag != "primary-build-cache" || v1.VolumeSizeGb != 200 || v1.VolumeReservedSizeGb != 20 {
+	if v1.VolumeSizeGb != 200 || v1.VolumeReservedSizeGb != 20 {
 		t.Errorf("v1 mismatch: %+v", v1)
 	}
 	if !v1.BundledContainerCache || !v1.BundledBuildkitCache || !v1.BundledGitMirror || !v1.BundledRunnerToolsCache || !v1.BundledRunnerActionsCache {
@@ -334,7 +334,7 @@ func TestRunnerProfile_Adversarial_CacheVolumeSettings(t *testing.T) {
 
 	// Verify Volume 2
 	v2 := receivedSpec.CacheVolumeSettings[1]
-	if v2.VolumeTag != "secondary-maven-cache" || v2.VolumeSizeGb != 50 || v2.VolumeReservedSizeGb != 0 {
+	if v2.VolumeSizeGb != 50 || v2.VolumeReservedSizeGb != 0 {
 		t.Errorf("v2 mismatch: %+v", v2)
 	}
 	if v2.BundledContainerCache || v2.BundledBuildkitCache || v2.BundledGitMirror || !v2.BundledRunnerToolsCache || v2.BundledRunnerActionsCache {
@@ -346,14 +346,14 @@ func TestRunnerProfile_Adversarial_CacheVolumeSettings(t *testing.T) {
 
 	// Verify Volume 3
 	v3 := receivedSpec.CacheVolumeSettings[2]
-	if v3.VolumeTag != "scratch-cache" || v3.VolumeSizeGb != 10 || v3.VolumeReservedSizeGb != 1 {
+	if v3.VolumeSizeGb != 10 || v3.VolumeReservedSizeGb != 1 {
 		t.Errorf("v3 mismatch: %+v", v3)
 	}
 	if v3.BundledContainerCache || v3.BundledBuildkitCache || v3.BundledGitMirror || v3.BundledRunnerToolsCache || v3.BundledRunnerActionsCache {
 		t.Errorf("v3 flags should all be false: %+v", v3)
 	}
 
-	// Verify state flattening matches
+	// Verify state flattening matches positionally
 	var stateResult github.RunnerProfileResourceModel
 	createResp.State.Get(ctx, &stateResult)
 	var stateCVs []github.CacheVolumeSettingModel
@@ -361,8 +361,14 @@ func TestRunnerProfile_Adversarial_CacheVolumeSettings(t *testing.T) {
 	if len(stateCVs) != 3 {
 		t.Fatalf("expected 3 cache volume settings in state, got %d", len(stateCVs))
 	}
-	if stateCVs[0].VolumeTag.ValueString() != "primary-build-cache" {
-		t.Errorf("state volume 0 tag mismatch: %s", stateCVs[0].VolumeTag.ValueString())
+	if stateCVs[0].VolumeSizeGB.ValueInt64() != 200 || len(stateCVs[0].AllowCommitFromBranch.Elements()) != 4 {
+		t.Errorf("state volume 0 mismatch: %+v", stateCVs[0])
+	}
+	if stateCVs[1].VolumeSizeGB.ValueInt64() != 50 || len(stateCVs[1].AllowCommitFromBranch.Elements()) != 1 {
+		t.Errorf("state volume 1 mismatch: %+v", stateCVs[1])
+	}
+	if stateCVs[2].VolumeSizeGB.ValueInt64() != 10 || stateCVs[2].AllowCommitFromBranch.IsNull() || len(stateCVs[2].AllowCommitFromBranch.Elements()) != 0 {
+		t.Errorf("state volume 2 mismatch: %+v", stateCVs[2])
 	}
 }
 
@@ -464,6 +470,7 @@ func TestRunnerProfile_Adversarial_NetworkEgressPolicies(t *testing.T) {
 				SwapSizeMB:            types.Int64Value(0),
 				BuilderMode:           types.StringNull(),
 				AccessLevel:           types.StringNull(),
+				CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 				ExperimentalFeatures:  types.ListNull(types.StringType),
 				NetworkPolicy:         npObj,
 				InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
@@ -596,6 +603,7 @@ func TestRunnerProfile_Adversarial_InstanceShapeAndSelectors(t *testing.T) {
 		SwapSizeMB:            types.Int64Value(0),
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  types.ListNull(types.StringType),
 		InstanceShape:         shapeObj,
 		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
@@ -713,6 +721,7 @@ func TestRunnerProfile_Adversarial_OutOfBandTagAndVersionMutationOnRead(t *testi
 		SwapSizeMB:            types.Int64Value(2048),
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  types.ListNull(types.StringType),
 		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
 		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
@@ -829,6 +838,7 @@ func TestRunnerProfile_Adversarial_ConcurrentOperationsRace(t *testing.T) {
 				SwapSizeMB:            types.Int64Value(1024),
 				BuilderMode:           types.StringNull(),
 				AccessLevel:           types.StringNull(),
+				CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 				ExperimentalFeatures:  types.ListNull(types.StringType),
 				InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
 				CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
@@ -1059,6 +1069,7 @@ func TestRunnerProfile_Adversarial_NilServerResponses(t *testing.T) {
 		SwapSizeMB:            types.Int64Value(0),
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  types.ListNull(types.StringType),
 		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
 		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
@@ -1185,6 +1196,7 @@ func TestRunnerProfile_Adversarial_CustomRunnerImagesStatusVariants(t *testing.T
 		SwapSizeMB:            types.Int64Value(0),
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  types.ListNull(types.StringType),
 		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
 		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
@@ -1273,6 +1285,7 @@ func TestRunnerProfile_Adversarial_MinimalSparseLifecycle(t *testing.T) {
 		SwapSizeMB:            types.Int64Value(0),
 		BuilderMode:           types.StringNull(),
 		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
 		ExperimentalFeatures:  types.ListNull(types.StringType),
 		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
 		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
@@ -1326,4 +1339,351 @@ func TestRunnerProfile_Adversarial_MinimalSparseLifecycle(t *testing.T) {
 	if updatedState.Description.ValueString() != "Added a description to sparse profile" {
 		t.Errorf("description mismatch: %s", updatedState.Description.ValueString())
 	}
+}
+
+func defaultTestRunnerProfileModel() github.RunnerProfileResourceModel {
+	return github.RunnerProfileResourceModel{
+		ID:                    types.StringUnknown(),
+		ProfileID:             types.StringUnknown(),
+		Version:               types.Int64Unknown(),
+		CreatedAt:             types.StringUnknown(),
+		UpdatedAt:             types.StringUnknown(),
+		Tag:                   types.StringValue("validator-test"),
+		OS:                    types.StringValue("ubuntu-24.04"),
+		Description:           types.StringNull(),
+		Emoji:                 types.StringNull(),
+		SwapSizeMB:            types.Int64Value(0),
+		BuilderMode:           types.StringNull(),
+		AccessLevel:           types.StringNull(),
+		CustomPermissions:     types.ListNull(github.CustomPermissionObjectType),
+		ExperimentalFeatures:  types.ListNull(types.StringType),
+		InstanceShape:         types.ObjectNull(github.InstanceShapeAttrTypes),
+		CacheVolumeSettings:   types.ListNull(github.CacheVolumeSettingObjectType),
+		CustomRunnerImageSpec: types.ObjectNull(github.CustomRunnerImageSpecAttrTypes),
+		NetworkPolicy:         types.ObjectNull(github.NetworkPolicyAttrTypes),
+		CustomRunnerImages:    types.ListNull(github.CustomRunnerImageStatusObjectType),
+	}
+}
+
+func TestRunnerProfileResource_NetworkPolicy_ConfigValidatorMatrix_And_Unknown(t *testing.T) {
+	ctx := context.Background()
+	r := github.NewRunnerProfileResource()
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	val := r.(resource.ResourceWithConfigValidators).ConfigValidators(ctx)[0]
+
+	buildCfg := func(npObj types.Object) tfsdk.Config {
+		m := defaultTestRunnerProfileModel()
+		m.NetworkPolicy = npObj
+		st := tfsdk.State{Schema: schemaResp.Schema}
+		if diags := st.Set(ctx, &m); diags.HasError() {
+			t.Fatalf("set config: %v", diags)
+		}
+		return tfsdk.Config{Schema: schemaResp.Schema, Raw: st.Raw}
+	}
+	makeNP := func(egress types.String, allowList types.List, advisory types.Bool, tag types.String) types.Object {
+		obj, diags := types.ObjectValue(github.NetworkPolicyAttrTypes, map[string]attr.Value{
+			"egress":                   egress,
+			"egress_domain_allow_list": allowList,
+			"advisory":                 advisory,
+			"egress_policy_tag":        tag,
+		})
+		if diags.HasError() {
+			t.Fatalf("ObjectValue: %v", diags)
+		}
+		return obj
+	}
+	strList := func(vals ...string) types.List {
+		elems := make([]attr.Value, len(vals))
+		for i, v := range vals {
+			elems[i] = types.StringValue(v)
+		}
+		l, _ := types.ListValue(types.StringType, elems)
+		return l
+	}
+
+	invalidCases := []struct {
+		name string
+		np   types.Object
+	}{
+		{"ALLOW_LIST_with_policy_tag", makeNP(types.StringValue("EGRESS_POLICY_DOMAIN_ALLOW_LIST"), strList("github.com"), types.BoolNull(), types.StringValue("corp-tag"))},
+		{"TAG_missing_policy_tag", makeNP(types.StringValue("EGRESS_POLICY_TAG"), types.ListNull(types.StringType), types.BoolNull(), types.StringValue("   "))},
+		{"TAG_with_allow_list", makeNP(types.StringValue("EGRESS_POLICY_TAG"), strList("github.com"), types.BoolNull(), types.StringValue("corp-tag"))},
+		{"NONE_with_allow_list", makeNP(types.StringValue("EGRESS_POLICY_NONE"), strList("github.com"), types.BoolNull(), types.StringNull())},
+		{"NONE_with_policy_tag", makeNP(types.StringValue("EGRESS_POLICY_NONE"), types.ListNull(types.StringType), types.BoolNull(), types.StringValue("corp-tag"))},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp resource.ValidateConfigResponse
+			val.ValidateResource(ctx, resource.ValidateConfigRequest{Config: buildCfg(tc.np)}, &resp)
+			if !resp.Diagnostics.HasError() {
+				t.Fatalf("expected validation error for %s", tc.name)
+			}
+		})
+	}
+
+	validUnknownCases := []struct {
+		name string
+		np   types.Object
+	}{
+		{"unknown_egress_with_advisory_true", makeNP(types.StringUnknown(), strList("github.com"), types.BoolValue(true), types.StringNull())},
+		{"ALLOW_LIST_with_unknown_allow_list", makeNP(types.StringValue("EGRESS_POLICY_DOMAIN_ALLOW_LIST"), types.ListUnknown(types.StringType), types.BoolNull(), types.StringNull())},
+		{"TAG_with_unknown_policy_tag", makeNP(types.StringValue("EGRESS_POLICY_TAG"), types.ListNull(types.StringType), types.BoolNull(), types.StringUnknown())},
+	}
+	for _, tc := range validUnknownCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp resource.ValidateConfigResponse
+			val.ValidateResource(ctx, resource.ValidateConfigRequest{Config: buildCfg(tc.np)}, &resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("unexpected validation error for %s: %v", tc.name, resp.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestRunnerProfileResource_Adversarial_NilSpec_EmptyCacheVolumes_And_UnknownUpgrade(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("explicit empty cache_volume_settings preserved and spec nil flattened cleanly", func(t *testing.T) {
+		srv := testutil.NewMockServer()
+		now := timestamppb.Now()
+
+		srv.Profile.CreateProfileFunc = func(ctx context.Context, req *githubv1beta.CreateProfileRequest) (*githubv1beta.CreateProfileResponse, error) {
+			return &githubv1beta.CreateProfileResponse{
+				Profile: &githubv1beta.RunnerProfileWithStatus{
+					ProfileId: "prof_empty_cv",
+					Version:   1,
+					CreatedAt: now,
+					UpdatedAt: now,
+					Spec:      req.GetSpec(),
+				},
+			}, nil
+		}
+		srv.Profile.ListProfilesFunc = func(ctx context.Context, _ *emptypb.Empty) (*githubv1beta.ListProfilesResponse, error) {
+			return &githubv1beta.ListProfilesResponse{
+				Profiles: []*githubv1beta.RunnerProfileWithStatus{
+					{
+						ProfileId: "prof_empty_cv",
+						Version:   2,
+						CreatedAt: now,
+						UpdatedAt: now,
+						Spec:      nil,
+					},
+				},
+			}, nil
+		}
+
+		r, schemaResp := setupTestResource(t, srv)
+
+		emptyCV, _ := types.ListValue(github.CacheVolumeSettingObjectType, []attr.Value{})
+		planModel := defaultTestRunnerProfileModel()
+		planModel.Tag = types.StringValue("empty-cv-tag")
+		planModel.CacheVolumeSettings = emptyCV
+
+		planState := tfsdk.State{Schema: schemaResp.Schema}
+		if diags := planState.Set(ctx, &planModel); diags.HasError() {
+			t.Fatalf("set plan: %v", diags)
+		}
+
+		createResp := &resource.CreateResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+		r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: schemaResp.Schema, Raw: planState.Raw}}, createResp)
+		if createResp.Diagnostics.HasError() {
+			t.Fatalf("Create failed: %v", createResp.Diagnostics)
+		}
+
+		var created github.RunnerProfileResourceModel
+		if diags := createResp.State.Get(ctx, &created); diags.HasError() {
+			t.Fatalf("get created state: %v", diags)
+		}
+		if created.CacheVolumeSettings.IsNull() || len(created.CacheVolumeSettings.Elements()) != 0 {
+			t.Fatalf("expected explicit empty cache_volume_settings = [], got %v", created.CacheVolumeSettings)
+		}
+
+		readResp := &resource.ReadResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+		r.Read(ctx, resource.ReadRequest{State: createResp.State}, readResp)
+		if readResp.Diagnostics.HasError() {
+			t.Fatalf("Read with nil spec failed: %v", readResp.Diagnostics)
+		}
+
+		var readState github.RunnerProfileResourceModel
+		if diags := readResp.State.Get(ctx, &readState); diags.HasError() {
+			t.Fatalf("get read state: %v", diags)
+		}
+		if !readState.Tag.IsNull() || !readState.OS.IsNull() || !readState.CacheVolumeSettings.IsNull() || !readState.NetworkPolicy.IsNull() {
+			t.Fatalf("expected nil spec to flatten spec attributes to null, got %+v", readState)
+		}
+		if readState.Version.ValueInt64() != 2 {
+			t.Fatalf("expected version 2 from nil-spec profile, got %d", readState.Version.ValueInt64())
+		}
+	})
+
+	t.Run("UpgradeState v0 to v1 preserves unknown cache_volume_settings", func(t *testing.T) {
+		r := github.NewRunnerProfileResource()
+		var schemaResp resource.SchemaResponse
+		r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+
+		upgrader := r.(resource.ResourceWithUpgradeState).UpgradeState(ctx)[0]
+		priorType := upgrader.PriorSchema.Type().TerraformType(ctx).(tftypes.Object)
+		cvType := priorType.AttributeTypes["cache_volume_settings"]
+		efType := priorType.AttributeTypes["experimental_features"]
+		isType := priorType.AttributeTypes["instance_shape"]
+		csType := priorType.AttributeTypes["custom_runner_image_spec"]
+		npType := priorType.AttributeTypes["network_policy"]
+		ciType := priorType.AttributeTypes["custom_runner_images"]
+
+		rawVal := tftypes.NewValue(priorType, map[string]tftypes.Value{
+			"id":                       tftypes.NewValue(tftypes.String, "prof_unknown_cv"),
+			"profile_id":               tftypes.NewValue(tftypes.String, "prof_unknown_cv"),
+			"version":                  tftypes.NewValue(tftypes.Number, 1),
+			"created_at":               tftypes.NewValue(tftypes.String, "2026-08-22T10:00:00Z"),
+			"updated_at":               tftypes.NewValue(tftypes.String, "2026-08-22T10:00:00Z"),
+			"tag":                      tftypes.NewValue(tftypes.String, "unknown-cv"),
+			"os":                       tftypes.NewValue(tftypes.String, "ubuntu-24.04"),
+			"description":              tftypes.NewValue(tftypes.String, nil),
+			"emoji":                    tftypes.NewValue(tftypes.String, nil),
+			"swap_size_mb":             tftypes.NewValue(tftypes.Number, 0),
+			"builder_mode":             tftypes.NewValue(tftypes.String, nil),
+			"access_level":             tftypes.NewValue(tftypes.String, nil),
+			"experimental_features":    tftypes.NewValue(efType, nil),
+			"instance_shape":           tftypes.NewValue(isType, nil),
+			"cache_volume_settings":    tftypes.NewValue(cvType, tftypes.UnknownValue),
+			"custom_runner_image_spec": tftypes.NewValue(csType, nil),
+			"network_policy":           tftypes.NewValue(npType, nil),
+			"custom_runner_images":     tftypes.NewValue(ciType, nil),
+		})
+
+		req := resource.UpgradeStateRequest{
+			State: &tfsdk.State{
+				Schema: *upgrader.PriorSchema,
+				Raw:    rawVal,
+			},
+		}
+		resp := &resource.UpgradeStateResponse{
+			State: tfsdk.State{Schema: schemaResp.Schema},
+		}
+		upgrader.StateUpgrader(ctx, req, resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("UpgradeState with unknown cache_volume_settings failed: %v", resp.Diagnostics)
+		}
+		var out github.RunnerProfileResourceModel
+		if diags := resp.State.Get(ctx, &out); diags.HasError() {
+			t.Fatalf("get upgraded state: %v", diags)
+		}
+		if !out.CacheVolumeSettings.IsUnknown() {
+			t.Fatalf("expected upgraded CacheVolumeSettings to remain unknown, got %v", out.CacheVolumeSettings)
+		}
+	})
+}
+
+func TestRunnerProfileConfigValidator_UnknownAndNullCacheVolumeElements(t *testing.T) {
+	ctx := context.Background()
+	r := github.NewRunnerProfileResource()
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	validators := r.(resource.ResourceWithConfigValidators).ConfigValidators(ctx)
+	if len(validators) == 0 {
+		t.Fatal("expected at least one config validator")
+	}
+	val := validators[0]
+
+	buildCfg := func(cvList types.List) tfsdk.Config {
+		model := defaultTestRunnerProfileModel()
+		model.CacheVolumeSettings = cvList
+		state := tfsdk.State{Schema: schemaResp.Schema}
+		if diags := state.Set(ctx, &model); diags.HasError() {
+			t.Fatalf("set config state: %v", diags)
+		}
+		return tfsdk.Config{Schema: schemaResp.Schema, Raw: state.Raw}
+	}
+
+	knownValidObj, diags := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
+		"volume_size_gb":               types.Int64Value(50),
+		"volume_reserved_size_gb":      types.Int64Value(10),
+		"bundled_container_cache":      types.BoolNull(),
+		"bundled_buildkit_cache":       types.BoolNull(),
+		"bundled_git_mirror":           types.BoolNull(),
+		"bundled_runner_tools_cache":   types.BoolNull(),
+		"bundled_runner_actions_cache": types.BoolNull(),
+		"allow_commit_from_branch":     types.ListNull(types.StringType),
+	})
+	if diags.HasError() {
+		t.Fatalf("build valid cv obj: %v", diags)
+	}
+
+	knownInvalidObj, diags := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
+		"volume_size_gb":               types.Int64Value(20),
+		"volume_reserved_size_gb":      types.Int64Value(20),
+		"bundled_container_cache":      types.BoolNull(),
+		"bundled_buildkit_cache":       types.BoolNull(),
+		"bundled_git_mirror":           types.BoolNull(),
+		"bundled_runner_tools_cache":   types.BoolNull(),
+		"bundled_runner_actions_cache": types.BoolNull(),
+		"allow_commit_from_branch":     types.ListNull(types.StringType),
+	})
+	if diags.HasError() {
+		t.Fatalf("build invalid cv obj: %v", diags)
+	}
+
+	knownNestedUnknownObj, diags := types.ObjectValue(github.CacheVolumeSettingAttrTypes, map[string]attr.Value{
+		"volume_size_gb":               types.Int64Unknown(),
+		"volume_reserved_size_gb":      types.Int64Value(10),
+		"bundled_container_cache":      types.BoolNull(),
+		"bundled_buildkit_cache":       types.BoolNull(),
+		"bundled_git_mirror":           types.BoolNull(),
+		"bundled_runner_tools_cache":   types.BoolNull(),
+		"bundled_runner_actions_cache": types.BoolNull(),
+		"allow_commit_from_branch":     types.ListUnknown(types.StringType),
+	})
+	if diags.HasError() {
+		t.Fatalf("build nested unknown cv obj: %v", diags)
+	}
+
+	t.Run("wholly unknown object element passes without Value Conversion Error", func(t *testing.T) {
+		cvList := types.ListValueMust(github.CacheVolumeSettingObjectType, []attr.Value{
+			types.ObjectUnknown(github.CacheVolumeSettingAttrTypes),
+		})
+		var resp resource.ValidateConfigResponse
+		val.ValidateResource(ctx, resource.ValidateConfigRequest{Config: buildCfg(cvList)}, &resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics)
+		}
+	})
+
+	t.Run("null and unknown elements alongside valid and nested-unknown objects pass", func(t *testing.T) {
+		cvList := types.ListValueMust(github.CacheVolumeSettingObjectType, []attr.Value{
+			types.ObjectNull(github.CacheVolumeSettingAttrTypes),
+			types.ObjectUnknown(github.CacheVolumeSettingAttrTypes),
+			knownValidObj,
+			knownNestedUnknownObj,
+		})
+		var resp resource.ValidateConfigResponse
+		val.ValidateResource(ctx, resource.ValidateConfigRequest{Config: buildCfg(cvList)}, &resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics)
+		}
+	})
+
+	t.Run("unknown element followed by invalid element still validates invalid element at exact index", func(t *testing.T) {
+		cvList := types.ListValueMust(github.CacheVolumeSettingObjectType, []attr.Value{
+			types.ObjectUnknown(github.CacheVolumeSettingAttrTypes),
+			knownInvalidObj,
+		})
+		var resp resource.ValidateConfigResponse
+		val.ValidateResource(ctx, resource.ValidateConfigRequest{Config: buildCfg(cvList)}, &resp)
+		if !resp.Diagnostics.HasError() {
+			t.Fatal("expected Invalid Cache Volume Reserved Size error")
+		}
+		found := false
+		for _, d := range resp.Diagnostics.Errors() {
+			if strings.Contains(d.Summary(), "Value Conversion Error") {
+				t.Fatalf("unexpected Value Conversion Error: %s: %s", d.Summary(), d.Detail())
+			}
+			if strings.Contains(d.Summary(), "Invalid Cache Volume Reserved Size") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected Invalid Cache Volume Reserved Size diagnostic, got: %v", resp.Diagnostics.Errors())
+		}
+	})
 }

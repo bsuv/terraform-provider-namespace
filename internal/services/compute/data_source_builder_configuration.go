@@ -106,7 +106,7 @@ func (d *builderConfigurationDataSource) Schema(ctx context.Context, req datasou
 						Computed:    true,
 					},
 					"os": schema.StringAttribute{
-						Description: "OS family (`linux`, `macos`).",
+						Description: "OS family (`linux`, `macos`, `windows`).",
 						Computed:    true,
 					},
 				},

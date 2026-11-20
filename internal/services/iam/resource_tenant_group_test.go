@@ -133,11 +133,11 @@ func TestTenantGroupResource_Create_Success(t *testing.T) {
 		return &iamv1beta.DescribeTenantGroupResponse{
 			Name: req.Name,
 			Policies: []*iamv1beta.TenantGroupPolicy{
-				{Policy: "namespace.cloud.compute.v1beta.UsagePolicy", Value: `{"max_instances": 10}`},
+				{Policy: "namespace.cloud.compute.v1beta.UsagePolicy", Value: `{"concurrency_limits":{"max_instance_count":10}}`},
 			},
 			EnrolledTenantIds: []string{"tenant_123"},
 			Versions: []*iamv1beta.TenantGroupPolicy{
-				{Policy: "namespace.cloud.compute.v1beta.UsagePolicy", Value: `{"max_instances": 10}`},
+				{Policy: "namespace.cloud.compute.v1beta.UsagePolicy", Value: `{"concurrency_limits":{"max_instance_count":10}}`},
 			},
 		}, nil
 	}
@@ -152,7 +152,7 @@ func TestTenantGroupResource_Create_Success(t *testing.T) {
 	planModel := iam.TenantGroupResourceModel{
 		ID:                types.StringUnknown(),
 		Name:              types.StringValue("engineering"),
-		Policies:          makePoliciesList(t, [2]string{"namespace.cloud.compute.v1beta.UsagePolicy", `{"max_instances": 10}`}),
+		Policies:          makePoliciesList(t, [2]string{"namespace.cloud.compute.v1beta.UsagePolicy", `{"concurrency_limits":{"max_instance_count":10}}`}),
 		EnrolledTenantIDs: types.ListNull(types.StringType),
 	}
 

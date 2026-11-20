@@ -1,27 +1,131 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/private/sessions/sessionsv1betagrpc"
 	sessions "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/private/sessions"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/types/known/durationpb"
-	"namespacelabs.dev/integrations/api"
-	"namespacelabs.dev/integrations/auth"
 )
+
+// TokenSource issues bearer tokens for authenticating Namespace Cloud gRPC requests.
+type TokenSource interface {
+	IssueToken(ctx context.Context, minDuration time.Duration, force bool) (string, error)
+}
+
+// ErrNotLoggedIn is returned when a token lacks a supported prefix or cannot be parsed as a JWT.
+var ErrNotLoggedIn = errors.New("not logged in")
+
+// NumericDate represents a JSON numeric date value (RFC 7519 Section 2: Unix epoch seconds).
+type NumericDate struct {
+	time.Time
+}
+
+// UnmarshalJSON decodes an integer or floating-point JSON Unix timestamp into NumericDate.
+func (d *NumericDate) UnmarshalJSON(b []byte) error {
+	trimmed := bytes.TrimSpace(b)
+	if string(trimmed) == "null" {
+		return nil
+	}
+	if len(trimmed) == 0 || (trimmed[0] != '-' && (trimmed[0] < '0' || trimmed[0] > '9')) {
+		return fmt.Errorf("invalid numeric date: %s", string(b))
+	}
+	var num json.Number
+	if err := json.Unmarshal(trimmed, &num); err != nil {
+		return err
+	}
+	if sec, err := num.Int64(); err == nil {
+		*d = NumericDate{Time: time.Unix(sec, 0).UTC()}
+		return nil
+	}
+	f, err := num.Float64()
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f >= 9223372036854775808.0 || f < -9223372036854775808.0 {
+		return fmt.Errorf("invalid numeric date: %s", string(b))
+	}
+	sec, frac := math.Modf(f)
+	if sec >= 9223372036854775808.0 || sec < -9223372036854775808.0 {
+		return fmt.Errorf("invalid numeric date: %s", string(b))
+	}
+	*d = NumericDate{Time: time.Unix(int64(sec), int64(frac*1e9)).UTC()}
+	return nil
+}
+
+// TokenClaims holds the unverified claims extracted from a Namespace prefixed JWT token.
+type TokenClaims struct {
+	ExpiresAt      *NumericDate `json:"exp,omitempty"`
+	TenantID       string       `json:"tenant_id"`
+	ActorID        string       `json:"actor_id"`
+	InstanceID     string       `json:"instance_id"`
+	OwnerID        string       `json:"owner_id"`
+	PrimaryRegion  string       `json:"primary_region"`
+	WorkloadRegion string       `json:"workload_region"`
+}
+
+// ExtractClaims decodes unverified JWT claims from st_, nsct_, or nscw_ prefixed tokens.
+func ExtractClaims(token string) (*TokenClaims, error) {
+	switch {
+	case strings.HasPrefix(token, "st_"):
+		return parseClaims(strings.TrimPrefix(token, "st_"))
+	case strings.HasPrefix(token, "nsct_"):
+		return parseClaims(strings.TrimPrefix(token, "nsct_"))
+	case strings.HasPrefix(token, "nscw_"):
+		return parseClaims(strings.TrimPrefix(token, "nscw_"))
+	default:
+		return nil, ErrNotLoggedIn
+	}
+}
+
+func parseClaims(raw string) (*TokenClaims, error) {
+	for _, r := range raw {
+		if unicode.IsSpace(r) || r < 0x20 || r == 0x7f {
+			return nil, ErrNotLoggedIn
+		}
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return nil, ErrNotLoggedIn
+	}
+	if !isBase64URLSegment(parts[2]) {
+		return nil, ErrNotLoggedIn
+	}
+	headerBytes, err := decodeBase64URL(parts[0])
+	if err != nil {
+		return nil, ErrNotLoggedIn
+	}
+	var header map[string]any
+	if err := json.Unmarshal(headerBytes, &header); err != nil || header == nil {
+		return nil, ErrNotLoggedIn
+	}
+	claimBytes, err := decodeBase64URL(parts[1])
+	if err != nil {
+		return nil, ErrNotLoggedIn
+	}
+	trimmedClaims := bytes.TrimSpace(claimBytes)
+	if len(trimmedClaims) == 0 || trimmedClaims[0] != '{' {
+		return nil, ErrNotLoggedIn
+	}
+	var claims TokenClaims
+	if err := json.Unmarshal(trimmedClaims, &claims); err != nil {
+		return nil, ErrNotLoggedIn
+	}
+	return &claims, nil
+}
 
 // AuthConfig defines the input parameters for credential resolution.
 type AuthConfig struct {
@@ -32,7 +136,7 @@ type AuthConfig struct {
 	DialOptions []grpc.DialOption
 }
 
-// StaticTokenSource implements api.TokenSource for static string tokens.
+// StaticTokenSource implements TokenSource for static string tokens.
 type StaticTokenSource struct {
 	Token string
 }
@@ -45,7 +149,7 @@ func (s StaticTokenSource) IssueToken(ctx context.Context, minDuration time.Dura
 	return tok, nil
 }
 
-// SessionTokenSource implements api.TokenSource for session token exchange against a specific IAM endpoint.
+// SessionTokenSource implements TokenSource for session token exchange against a specific IAM endpoint.
 // It maintains provider-local isolation without reading or mutating global process environment variables.
 type SessionTokenSource struct {
 	mu             sync.Mutex
@@ -136,7 +240,7 @@ func (s *SessionTokenSource) IssueToken(ctx context.Context, minDuration time.Du
 	}
 
 	s.cachedToken = tenantToken
-	if claims, err := auth.ExtractClaims(tenantToken); err == nil && claims != nil && claims.ExpiresAt != nil {
+	if claims, err := ExtractClaims(tenantToken); err == nil && claims != nil && claims.ExpiresAt != nil {
 		s.cachedExpiry = claims.ExpiresAt.Time
 	} else {
 		s.cachedExpiry = time.Now().Add(dur)
@@ -330,6 +434,9 @@ func validateTokenFile(filePath, label string) error {
 	if len(trimmed) == 0 {
 		return fmt.Errorf("%s %q is empty", label, filePath)
 	}
+	if strings.HasPrefix(trimmed, "st_") && len(trimmed) > len("st_") && !strings.ContainsAny(trimmed, " \t\r\n") {
+		return nil
+	}
 	var payload tokenFilePayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("%s %q contains malformed JSON: %w", label, filePath, err)
@@ -340,29 +447,84 @@ func validateTokenFile(filePath, label string) error {
 	return nil
 }
 
-// loadDefaultTokenSource attempts to locate default Namespace credentials from /var/run/nsc/token.json
-// or the user config directory ~/.config/ns/token.json.
-func loadDefaultTokenSource(iamEndpoint string, creds credentials.TransportCredentials, dialOpts ...grpc.DialOption) (api.TokenSource, error) {
+func joinPathForOS(goos string, elem ...string) string {
+	if goos == "windows" && len(elem) > 0 && (elem[0] == `\` || elem[0] == `/` || strings.Contains(elem[0], `\`) || (len(elem[0]) >= 2 && elem[0][1] == ':')) {
+		rootOnly := elem[0] == `\` || elem[0] == `/`
+		parts := make([]string, 0, len(elem))
+		for i, e := range elem {
+			if i == 0 {
+				if rootOnly {
+					continue
+				}
+				e = strings.TrimRight(e, `/\`)
+			} else {
+				e = strings.Trim(e, `/\`)
+			}
+			if e != "" {
+				parts = append(parts, e)
+			}
+		}
+		if rootOnly {
+			if len(parts) == 0 {
+				return `\`
+			}
+			return `\` + strings.Join(parts, `\`)
+		}
+		return strings.Join(parts, `\`)
+	}
+	return filepath.Join(elem...)
+}
+
+func workloadTokenPaths(goos string, getenv func(string) string) []string {
+	if goos == "windows" {
+		var paths []string
+		if dir := strings.TrimSpace(getenv("NSC_METADATA_DIR")); dir != "" {
+			paths = append(paths, joinPathForOS(goos, dir, "token.json"))
+		}
+		if progData := strings.TrimSpace(getenv("ProgramData")); progData != "" {
+			paths = append(paths, joinPathForOS(goos, progData, "Namespace", "GuestAgent", "metadata", "token.json"))
+		}
+		return paths
+	}
+	return []string{"/var/run/nsc/token.json"}
+}
+
+// loadDefaultTokenSource attempts to locate default Namespace credentials from
+// /var/run/nsc/token.json (Unix), NSC_METADATA_DIR\token.json or
+// %ProgramData%\Namespace\GuestAgent\metadata\token.json (Windows), or the user config directory.
+func loadDefaultTokenSource(iamEndpoint string, creds credentials.TransportCredentials, dialOpts ...grpc.DialOption) (TokenSource, error) {
+	return loadDefaultTokenSourceWith(runtime.GOOS, os.Getenv, os.UserConfigDir, iamEndpoint, creds, dialOpts...)
+}
+
+func loadDefaultTokenSourceWith(
+	goos string,
+	getenv func(string) string,
+	userConfigDirFn func() (string, error),
+	iamEndpoint string,
+	creds credentials.TransportCredentials,
+	dialOpts ...grpc.DialOption,
+) (TokenSource, error) {
 	// 1. Workload token
-	const workloadTokenPath = "/var/run/nsc/token.json"
-	if fi, err := os.Stat(workloadTokenPath); err == nil {
-		if fi.IsDir() {
-			return nil, fmt.Errorf("default workload credential %q is a directory", workloadTokenPath)
+	for _, workloadTokenPath := range workloadTokenPaths(goos, getenv) {
+		if fi, err := os.Stat(workloadTokenPath); err == nil {
+			if fi.IsDir() {
+				return nil, fmt.Errorf("default workload credential %q is a directory", workloadTokenPath)
+			}
+			if err := validateTokenFile(workloadTokenPath, "default workload credential"); err != nil {
+				return nil, err
+			}
+			return NewLocalTokenSource(workloadTokenPath, iamEndpoint, creds, dialOpts...), nil
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to inspect default workload credential %q: %w", workloadTokenPath, err)
 		}
-		if err := validateTokenFile(workloadTokenPath, "default workload credential"); err != nil {
-			return nil, err
-		}
-		return NewLocalTokenSource(workloadTokenPath, iamEndpoint, creds, dialOpts...), nil
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to inspect default workload credential %q: %w", workloadTokenPath, err)
 	}
 
 	// 2. User token
-	userConfigDir, err := os.UserConfigDir()
+	userConfigDir, err := userConfigDirFn()
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve the operating-system user configuration directory: %w", err)
 	}
-	userTokenPath := filepath.Join(userConfigDir, "ns", "token.json")
+	userTokenPath := joinPathForOS(goos, userConfigDir, "ns", "token.json")
 	if fi, err := os.Stat(userTokenPath); err == nil {
 		if fi.IsDir() {
 			return nil, fmt.Errorf("default user credential %q is a directory", userTokenPath)
@@ -378,13 +540,20 @@ func loadDefaultTokenSource(iamEndpoint string, creds credentials.TransportCrede
 	return nil, fmt.Errorf("no Namespace credentials found. Provide provider token/token_file, set NSC_TOKEN/NSC_TOKEN_FILE, or log in via `nsc login`")
 }
 
-// ResolveTokenSource resolves the active api.TokenSource using the deterministic precedence chain:
+func resolveInlineTokenSource(tok, iamEP string, creds credentials.TransportCredentials, dialOpts ...grpc.DialOption) TokenSource {
+	if strings.HasPrefix(tok, "st_") {
+		return NewSessionTokenSource(tok, iamEP, creds, dialOpts...)
+	}
+	return StaticTokenSource{Token: tok}
+}
+
+// ResolveTokenSource resolves the active TokenSource using the deterministic precedence chain:
 // 1. Provider configuration `token`
 // 2. Provider configuration `token_file`
 // 3. Environment variable `NSC_TOKEN`
 // 4. Environment variable `NSC_TOKEN_FILE`
-// 5. Fallback default credentials (workload token `/var/run/nsc/token.json` then user token `~/.config/ns/token.json`)
-func ResolveTokenSource(ctx context.Context, cfg AuthConfig) (api.TokenSource, error) {
+// 5. Fallback default credentials (workload token `/var/run/nsc/token.json` on Unix or `NSC_METADATA_DIR\token.json` / `%ProgramData%\Namespace\GuestAgent\metadata\token.json` on Windows, then user token)
+func ResolveTokenSource(ctx context.Context, cfg AuthConfig) (TokenSource, error) {
 	iamEP := strings.Trim(cfg.IAMEndpoint, " ")
 	if strings.TrimSpace(cfg.IAMEndpoint) == "" {
 		if envIAM := os.Getenv("NSC_IAM_ENDPOINT"); strings.TrimSpace(envIAM) != "" {
@@ -396,7 +565,7 @@ func ResolveTokenSource(ctx context.Context, cfg AuthConfig) (api.TokenSource, e
 
 	// 1. Explicit provider token attribute
 	if trimmed := strings.TrimSpace(cfg.Token); trimmed != "" {
-		return StaticTokenSource{Token: trimmed}, nil
+		return resolveInlineTokenSource(trimmed, iamEP, cfg.Creds, cfg.DialOptions...), nil
 	}
 
 	// 2. Explicit provider token_file attribute
@@ -409,7 +578,7 @@ func ResolveTokenSource(ctx context.Context, cfg AuthConfig) (api.TokenSource, e
 
 	// 3. Environment variable NSC_TOKEN
 	if envTok := strings.TrimSpace(os.Getenv("NSC_TOKEN")); envTok != "" {
-		return StaticTokenSource{Token: envTok}, nil
+		return resolveInlineTokenSource(envTok, iamEP, cfg.Creds, cfg.DialOptions...), nil
 	}
 
 	// 4. Environment variable NSC_TOKEN_FILE
@@ -430,11 +599,52 @@ func ResolveTokenSource(ctx context.Context, cfg AuthConfig) (api.TokenSource, e
 }
 
 func decodeBase64URL(seg string) ([]byte, error) {
-	seg = strings.TrimSpace(seg)
-	if l := len(seg) % 4; l > 0 {
-		seg += strings.Repeat("=", 4-l)
+	if strings.Contains(seg, "=") {
+		return base64.URLEncoding.DecodeString(seg)
 	}
-	return base64.URLEncoding.DecodeString(seg)
+	return base64.RawURLEncoding.DecodeString(seg)
+}
+
+func isTokenPrefixChars(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isValid := (c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '_' ||
+			c == '-'
+		if !isValid {
+			return false
+		}
+	}
+	return true
+}
+
+func isBase64URLSegment(seg string) bool {
+	if seg == "" {
+		return false
+	}
+	for i := 0; i < 2 && len(seg) > 0 && seg[len(seg)-1] == '='; i++ {
+		seg = seg[:len(seg)-1]
+	}
+	if seg == "" {
+		return false
+	}
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		isValid := (c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' ||
+			c == '_'
+		if !isValid {
+			return false
+		}
+	}
+	return true
 }
 
 func isInlineToken(s string) bool {
@@ -442,10 +652,29 @@ func isInlineToken(s string) bool {
 		strings.HasPrefix(s, "st_") ||
 		strings.HasPrefix(s, "nscw_") ||
 		strings.HasPrefix(s, "nscu_") ||
+		strings.HasPrefix(s, "nsrt_") ||
 		strings.HasPrefix(s, "tok_") {
 		return true
 	}
-	return strings.HasPrefix(s, "eyJ") && len(strings.Split(s, ".")) == 3
+	if strings.ContainsAny(s, "/\\ \t\r\n") {
+		return false
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	header := parts[0]
+	if !strings.HasPrefix(header, "eyJ") {
+		idx := strings.Index(header, "_eyJ")
+		if idx <= 0 {
+			return false
+		}
+		if !isTokenPrefixChars(header[:idx]) {
+			return false
+		}
+		header = header[idx+1:]
+	}
+	return isBase64URLSegment(header) && isBase64URLSegment(parts[1]) && isBase64URLSegment(parts[2])
 }
 
 // ResolveTenantFromToken resolves the tenant identity from a given token string or token file path.
@@ -520,7 +749,7 @@ func resolveTenantFromTokenString(tokenStr string) (string, error) {
 
 	// Format 1: Namespace prefixed JWT tokens (nsct_<JWT>, st_<JWT>, nscw_<JWT>)
 	if strings.HasPrefix(tokenStr, "nsct_") || strings.HasPrefix(tokenStr, "st_") || strings.HasPrefix(tokenStr, "nscw_") {
-		claims, err := auth.ExtractClaims(tokenStr)
+		claims, err := ExtractClaims(tokenStr)
 		if err == nil && claims != nil && strings.TrimSpace(claims.TenantID) != "" {
 			return strings.TrimSpace(claims.TenantID), nil
 		}

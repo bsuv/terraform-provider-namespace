@@ -246,17 +246,7 @@ jobs:
       - name: Upgrade to Newest Compatible Dependencies
         run: |
           echo "Upgrading dependencies to the newest versions compatible with Go 1.27..."
-          integrations_before="$(go list -m -f '{{.Version}}' namespacelabs.dev/integrations)"
-          buf_grpc_before="$(go list -m -f '{{.Version}}' buf.build/gen/go/namespace/cloud/grpc/go)"
-          buf_pb_before="$(go list -m -f '{{.Version}}' buf.build/gen/go/namespace/cloud/protocolbuffers/go)"
           go get -u ./...
-          integrations_after="$(go list -m -f '{{.Version}}' namespacelabs.dev/integrations)"
-          if [ "${integrations_after}" = "${integrations_before}" ]; then
-            echo "namespacelabs.dev/integrations remained at ${integrations_before}; keeping coupled Buf cloud modules pinned."
-            go get \
-              "buf.build/gen/go/namespace/cloud/grpc/go@${buf_grpc_before}" \
-              "buf.build/gen/go/namespace/cloud/protocolbuffers/go@${buf_pb_before}"
-          fi
           go mod tidy
           go mod verify
 

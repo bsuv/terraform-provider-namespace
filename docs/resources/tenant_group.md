@@ -29,8 +29,14 @@ resource "namespace_tenant_group" "production" {
     {
       policy = "namespace.cloud.compute.v1beta.UsagePolicy"
       value = jsonencode({
-        max_cpus   = 128
-        max_memory = 524288
+        concurrency_limits = {
+          max_cpu            = 128
+          max_memory_mb      = 524288
+          max_instance_count = 32
+        }
+        devbox_limits = {
+          max_count = 10
+        }
       })
     }
   ]

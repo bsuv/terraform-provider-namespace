@@ -159,6 +159,164 @@ def _scan_quoted_value_end(text, start, bs_len, quote):
     return None
 
 
+def _scan_balanced_json_object_end(text, brace_idx, bs_len):
+    n = len(text)
+    if brace_idx >= n or text[brace_idx] != '{':
+        return None
+    if bs_len == 0:
+        k = brace_idx + 1
+        while k < n:
+            if text[k] in (' ', '\t'):
+                k += 1
+                continue
+            if text[k] == '\\':
+                b_start = k
+                while k < n and text[k] == '\\':
+                    k += 1
+                if k < n and text[k] in ('n', 'r', 't', 'b', 'f'):
+                    k += 1
+                    continue
+                if k < n and text[k] in ('"', "'"):
+                    bs_len = k - b_start
+                break
+            break
+    step = 2 * (bs_len + 1)
+    depth = 1
+    str_quote = None
+    i = brace_idx + 1
+    while i < n:
+        ch = text[i]
+        if ch in ('\r', '\n'):
+            return None
+        if ch == '\\':
+            b_start = i
+            while i < n and text[i] == '\\':
+                i += 1
+            b_count = i - b_start
+            if i < n and text[i] in ('"', "'"):
+                q = text[i]
+                if str_quote is not None and b_count < bs_len and q == str_quote:
+                    return None
+                if b_count >= bs_len and (b_count - bs_len) % step == 0:
+                    if str_quote is None:
+                        str_quote = q
+                    elif str_quote == q:
+                        str_quote = None
+                i += 1
+            continue
+        if ch in ('"', "'"):
+            if bs_len == 0:
+                if str_quote is None:
+                    str_quote = ch
+                elif str_quote == ch:
+                    str_quote = None
+            elif str_quote == ch or (str_quote is None and ch == '"'):
+                return None
+            i += 1
+            continue
+        if str_quote is None:
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    return None
+
+
+def _is_word_char(ch):
+    return ('a' <= ch <= 'z') or ('A' <= ch <= 'Z') or ('0' <= ch <= '9') or ch == '_'
+
+
+def _preceding_backslash_count(s, idx):
+    count = 0
+    i = idx - 1
+    while i >= 0 and s[i] == '\\':
+        count += 1
+        i -= 1
+    return count
+
+
+def _parse_hex4(s):
+    if len(s) != 4:
+        return None
+    for ch in s:
+        if not (('0' <= ch <= '9') or ('a' <= ch <= 'f') or ('A' <= ch <= 'F')):
+            return None
+    return int(s, 16)
+
+
+def _is_json_escape_start_at(s, idx):
+    n = len(s)
+    if idx < 1 or idx >= n:
+        return False
+    ch = s[idx]
+    if ch in ('n', 'r', 't', 'b', 'f'):
+        return _preceding_backslash_count(s, idx) % 2 == 1
+    if ch == 'u':
+        if idx + 4 >= n or _preceding_backslash_count(s, idx) % 2 != 1:
+            return False
+        return _parse_hex4(s[idx + 1:idx + 5]) is not None
+    return False
+
+
+def _is_json_escape_end_at(s, idx):
+    n = len(s)
+    if idx < 1 or idx >= n:
+        return False
+    if s[idx] in ('n', 'r', 't', 'b', 'f') and _preceding_backslash_count(s, idx) % 2 == 1:
+        return True
+    if idx >= 5 and s[idx - 4] == 'u' and _preceding_backslash_count(s, idx - 4) % 2 == 1:
+        cp = _parse_hex4(s[idx - 3:idx + 1])
+        if cp is not None:
+            if cp < 128:
+                return not _is_word_char(chr(cp))
+            return True
+    return False
+
+
+def _is_json_escape_word_boundary(s, idx):
+    n = len(s)
+    if idx < 0 or idx > n:
+        return False
+    if idx < n and _is_json_escape_start_at(s, idx):
+        return False
+    if idx == 0:
+        return True
+    if not _is_word_char(s[idx - 1]):
+        return True
+    return _is_json_escape_end_at(s, idx - 1)
+
+
+def _replace_with_boundary(text, pattern, repl_fn):
+    out = []
+    pos = 0
+    n = len(text)
+    while pos < n:
+        m = pattern.search(text, pos)
+        if not m:
+            out.append(text[pos:])
+            break
+        match_start = m.start()
+        match_end = m.end()
+        if not _is_json_escape_word_boundary(text, match_start):
+            next_pos = max(pos + 1, match_start + 1)
+            out.append(text[pos:next_pos])
+            pos = next_pos
+            continue
+        out.append(text[pos:match_start])
+        out.append(repl_fn(m))
+        pos = max(pos + 1, match_end)
+    return ''.join(out)
+
+
+TOKEN_SPEC_OBJECT_PREFIX_RE = re.compile(
+    r'(?i)((?:(\\*)(["\']))?((?:TF_VAR_)?(?:nsc[_-]?)?token[_-]?spec(?:[_-]?file)?)(?:\\*["\'])?[ \t]*([:=])[ \t]*)\{'
+)
+REDACTED_PLACEHOLDER_RE = re.compile(r'^\[REDACTED(?:[ _][A-Z_]+)*\]$')
+
+
 def sanitize(text):
     def authorization_marker(value):
         stripped = value.lstrip()
@@ -168,14 +326,21 @@ def sanitize(text):
             return 'Basic [REDACTED_SECRET]'
         return '[REDACTED_TOKEN]'
 
+    def authorization_scheme_marker(value):
+        if re.match(r'(?i)^bearer\s+', value):
+            return 'Bearer [REDACTED_TOKEN]'
+        if re.match(r'(?i)^basic\s+', value):
+            return 'Basic [REDACTED_SECRET]'
+        return value
+
     def redact_quoted_field(value, key_pattern, marker, value_transform=None, require_quoted_key=False):
         if require_quoted_key:
             prefix_re = re.compile(
-                rf'(?i)((?:\\*["\'])(?:{key_pattern})(?:\\*["\'])[ \t]*[:=][ \t]*)(\\*)(["\'])'
+                rf'(?i)((?:\\*["\'])(?P<key>{key_pattern})(?:\\*["\'])[ \t]*[:=][ \t]*)(?P<bs>\\*)(?P<quote>["\'])'
             )
         else:
             prefix_re = re.compile(
-                rf'(?i)((?:\\*["\'])?(?:{key_pattern})(?:\\*["\'])?[ \t]*[:=][ \t]*)(\\*)(["\'])'
+                rf'(?i)((?:\\*["\'])?(?P<key>{key_pattern})(?:\\*["\'])?[ \t]*[:=][ \t]*)(?P<bs>\\*)(?P<quote>["\'])'
             )
         out = []
         pos = 0
@@ -185,9 +350,15 @@ def sanitize(text):
             if not m:
                 out.append(value[pos:])
                 break
+            key_start = m.start('key')
+            if not _is_json_escape_word_boundary(value, key_start):
+                advance = max(pos + 1, key_start + 1)
+                out.append(value[pos:advance])
+                pos = advance
+                continue
             val_start = m.end()
-            bs_len = len(m.group(2))
-            quote = m.group(3)
+            bs_len = len(m.group('bs'))
+            quote = m.group('quote')
             bounds = _scan_quoted_value_end(value, val_start, bs_len, quote)
             if bounds is None:
                 out.append(value[pos:val_start])
@@ -195,7 +366,12 @@ def sanitize(text):
                 continue
             val_end, close_end = bounds
             raw_val = value[val_start:val_end]
-            replacement = value_transform(raw_val) if value_transform is not None else marker
+            if value_transform is not None:
+                replacement = value_transform(raw_val)
+            elif REDACTED_PLACEHOLDER_RE.fullmatch(raw_val.strip()):
+                replacement = raw_val
+            else:
+                replacement = marker
             out.append(value[pos:val_start])
             out.append(replacement)
             out.append(value[val_end:close_end])
@@ -246,51 +422,146 @@ def sanitize(text):
             pos = i
         return ''.join(out)
 
+    def redact_token_spec_objects(value):
+        out = []
+        pos = 0
+        n = len(value)
+        while pos < n:
+            m = TOKEN_SPEC_OBJECT_PREFIX_RE.search(value, pos)
+            if not m:
+                out.append(value[pos:])
+                break
+            key_start = m.start(4)
+            if not _is_json_escape_word_boundary(value, key_start):
+                advance = max(pos + 1, key_start + 1)
+                out.append(value[pos:advance])
+                pos = advance
+                continue
+            prefix_start = m.start(1)
+            prefix_end = m.end(1)
+            brace_idx = m.end() - 1
+            bs = m.group(2) or ''
+            bs_len = len(bs)
+            quote = m.group(3) or ''
+            sep = m.group(5)
+
+            obj_end = _scan_balanced_json_object_end(value, brace_idx, bs_len)
+            if obj_end is None:
+                out.append(value[pos:brace_idx + 1])
+                pos = brace_idx + 1
+                continue
+
+            out.append(value[pos:prefix_start])
+            out.append(value[prefix_start:prefix_end])
+            if sep == '=':
+                out.append('[REDACTED]')
+            else:
+                q = quote if quote else '"'
+                out.append(f'{bs}{q}[REDACTED_TOKEN]{bs}{q}')
+            pos = obj_end
+        return ''.join(out)
+
     def redact_unquoted_field(value, key_pattern, marker):
         pattern = re.compile(
-            rf'(?i)(?P<prefix>\b(?:{key_pattern})\b[ \t]*[:=][ \t]*)'
-            rf'(?!\\*["\'])(?P<value>\[REDACTED_[A-Z_]+\]|[^\s,;{{}}\'"\\&]+)'
+            rf'(?i)(?P<prefix>(?:{key_pattern})\b[ \t]*[:=][ \t]*)'
+            rf'(?!\\*["\']|\[(?:bearer|basic)\b)(?P<value>\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{{}}\'"\\&]*)?|[^\s,;{{}}\'"\\&]+)'
         )
 
         def replace(match):
-            # Preserve authentication scheme labels. The scheme-aware pass
-            # redacts the credential that follows them.
-            if match.group('value').lower() in ('bearer', 'basic'):
+            # Preserve authentication scheme labels and already-redacted placeholders.
+            val = match.group('value')
+            if val.lower() in ('bearer', 'basic') or REDACTED_PLACEHOLDER_RE.fullmatch(val):
                 return match.group(0)
             return f"{match.group('prefix')}{marker}"
 
-        return pattern.sub(replace, value)
+        return _replace_with_boundary(value, pattern, replace)
 
     # Redact client certs and private keys (EC, OpenSSH, RSA, DSA, ECDSA, PGP, Encrypted, truncated)
     text = PEM_COMPLETE_RE.sub('[REDACTED_KEY_OR_CERT]', text)
     text = PEM_TRUNCATED_RE.sub('[REDACTED_KEY_OR_CERT]', text)
     # Redact URL userinfo credentials (e.g. https://user:pass@host)
     text = re.sub(r'(?i)((?:https?|grpcs?|ftp|wss?|socks5h?)://)([^\s/@?#"\'<>]+)@', r'\1[REDACTED_CREDENTIALS]@', text)
-    # Redact secret environment assignments (word-bounded, supports quoted values with spaces)
-    text = re.sub(
-        r'(?i)\b(NSC_TOKEN|NSC_PARTNER_TOKEN|NSC_TRUSTED_JWT|NSC_TOKEN_FILE|CACHE_PASSWORD|GPG_PRIVATE_KEY|PASSPHRASE|TF_VAR_nsc_[A-Za-z0-9_]+)=(?:"(?:\\.|[^"\\\r\n])*"|\'(?:\\.|[^\'\\\r\n])*\'|[^\s\n,;{}\'"]+)',
-        r'\1=[REDACTED]',
+    # Redact balanced single-line JSON object values for token_spec / NSC_TOKEN_SPEC* (both ':' and '=' delimited)
+    text = redact_token_spec_objects(text)
+    # Redact secret environment assignments (word-bounded, supports quoted values with spaces and balanced JSON objects)
+    env_var_obj_re = re.compile(
+        r'(?i)(?P<key>NSC_TOKEN|NSC_TOKEN_SPEC_FILE|NSC_TOKEN_SPEC|NSC_PARTNER_TOKEN|NSC_TRUSTED_JWT|NSC_TOKEN_FILE|CACHE_PASSWORD|GPG_PRIVATE_KEY|PASSPHRASE|TF_VAR_nsc_[A-Za-z0-9_]+)=\{'
+    )
+    out_parts = []
+    pos = 0
+    while pos < len(text):
+        m = env_var_obj_re.search(text, pos)
+        if not m:
+            out_parts.append(text[pos:])
+            break
+        key_start = m.start('key')
+        if not _is_json_escape_word_boundary(text, key_start):
+            advance = max(pos + 1, key_start + 1)
+            out_parts.append(text[pos:advance])
+            pos = advance
+            continue
+        brace_idx = m.end() - 1
+        obj_end = _scan_balanced_json_object_end(text, brace_idx, 0)
+        if obj_end is None:
+            out_parts.append(text[pos:brace_idx + 1])
+            pos = brace_idx + 1
+            continue
+        out_parts.append(text[pos:key_start])
+        out_parts.append(f"{m.group('key')}=[REDACTED]")
+        pos = obj_end
+    text = ''.join(out_parts)
+    env_var_re = re.compile(
+        r'(?i)(?P<key>NSC_TOKEN|NSC_TOKEN_SPEC_FILE|NSC_TOKEN_SPEC|NSC_PARTNER_TOKEN|NSC_TRUSTED_JWT|NSC_TOKEN_FILE|CACHE_PASSWORD|GPG_PRIVATE_KEY|PASSPHRASE|TF_VAR_nsc_[A-Za-z0-9_]+)='
+        r'(?P<val>"(?:\\.|[^"\\\r\n])*"|\'(?:\\.|[^\'\\\r\n])*\'|\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s\n,;{}\'"\\&]*)?|[^\s\n,;{}\'"\\&]+)'
+    )
+    text = _replace_with_boundary(
         text,
+        env_var_re,
+        lambda m: m.group(0) if REDACTED_PLACEHOLDER_RE.fullmatch(m.group('val')) else f"{m.group('key')}=[REDACTED]",
     )
     # Redact authorization values in JSON arrays, Go metadata maps, headers, and quoted fields.
     text = redact_auth_arrays(text)
-    text = re.sub(
-        r'(?i)(\bauthorization:\s*\[)(bearer|basic)(\s+)(?:\[REDACTED_[A-Z_]+\]|[^\]\r\n]+)(\])',
+    text = _replace_with_boundary(
+        text,
+        re.compile(r'(?i)(authorization:\s*\[)(bearer|basic)(\s+)(?:\[REDACTED(?:[ _][A-Z_]+)*\]|[^\]\r\n]+)(\])'),
         lambda match: f"{match.group(1)}{match.group(2)}{match.group(3)}"
         + ('[REDACTED_TOKEN]' if match.group(2).lower() == 'bearer' else '[REDACTED_SECRET]')
         + match.group(4),
-        text,
     )
     text = redact_quoted_field(text, r'authorization', '[REDACTED_TOKEN]', authorization_marker, require_quoted_key=True)
-    text = re.sub(
-        r'(?i)(\bauthorization\b\s*[:=]\s*)(bearer|basic)\s+(?:\[REDACTED_[A-Z_]+\]|[^\s,;{}\'"\\&\]]+)',
-        lambda match: f"{match.group(1)}{match.group(2)} " +
-        ('[REDACTED_TOKEN]' if match.group(2).lower() == 'bearer' else '[REDACTED_SECRET]'),
+    text = redact_quoted_field(text, r'authorization', '[REDACTED_TOKEN]', authorization_scheme_marker, require_quoted_key=False)
+    text = _replace_with_boundary(
         text,
+        re.compile(r'(?i)(authorization\b\s*[:=]\s*)(bearer|basic)\s+(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}\'"\\&\]]*)?|[^\s,;{}\'"\\&\]]+)'),
+        lambda match: f"{match.group(1)}{match.group(2)} "
+        + ('[REDACTED_TOKEN]' if match.group(2).lower() == 'bearer' else '[REDACTED_SECRET]'),
+    )
+    # Redact Authorization Bearer headers and standalone Bearer tokens
+    text = _replace_with_boundary(
+        text,
+        re.compile(r'(?i)(authorization\s*[:=]\s*bearer\s+)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}\'"\\&\]]*)?|[^\s,;{}\'"\\&\]]+)'),
+        lambda match: f"{match.group(1)}[REDACTED_TOKEN]",
+    )
+    text = _replace_with_boundary(
+        text,
+        re.compile(r'(?i)(bearer\s+)(?:\[REDACTED(?:[ _][A-Z_]+)*\]|[a-zA-Z0-9_\-\.+/=]{20,})'),
+        lambda match: f"{match.group(1)}[REDACTED_TOKEN]",
+    )
+    # Redact Namespace token formats and standalone/prefixed JWTs before unquoted field matching
+    # so enclosing punctuation such as "(token: st_...) failed" is preserved intact.
+    text = _replace_with_boundary(
+        text,
+        re.compile(r'(?:nsct_|nscw_|nscu_|nsrt_|tok_|st_)(?:eyJ[A-Za-z0-9_\-]+={0,2}\.[A-Za-z0-9_\-]+={0,2}\.[A-Za-z0-9_\-]+={0,2}|[A-Za-z0-9_\-\.]+={0,2})'),
+        lambda _match: '[REDACTED_TOKEN]',
+    )
+    text = _replace_with_boundary(
+        text,
+        re.compile(r'(?:[A-Za-z0-9_-]+_)?eyJ[A-Za-z0-9_\-]+={0,2}\.[A-Za-z0-9_\-]+={0,2}\.[A-Za-z0-9_\-]+={0,2}'),
+        lambda _match: '[REDACTED_JWT]',
     )
     text = redact_unquoted_field(text, r'authorization', '[REDACTED_TOKEN]')
 
-    token_keys = r'(?:token|(?:bearer|id|session|access|refresh|partner|client|auth|tenant|workload|oidc)[_-]?token|trusted[_-]?jwt|jwt)'
+    token_keys = r'(?:token|(?:bearer|id|session|access|refresh|partner|client|auth|tenant|workload|oidc)[_-]?token|(?:nsc[_-]?)?token[_-]?spec(?:[_-]?file)?|trusted[_-]?jwt|jwt)'
     private_key_keys = r'(?:(?:api|private|client|signing)[_-]?key(?:[_-]?pem)?)'
     certificate_keys = r'(?:(?:client[_-]?)?cert(?:ificate)?(?:[_-]?pem)?)'
     secret_keys = r'(?:secret|client[_-]?secret|credentials?)'
@@ -305,15 +576,12 @@ def sanitize(text):
     ):
         text = redact_quoted_field(text, key_pattern, marker)
         text = redact_unquoted_field(text, key_pattern, marker)
-    # Redact Authorization Bearer headers (case-insensitive)
-    text = re.sub(r'(?i)(\bauthorization\s*[:=]\s*bearer\s+)(?:\[REDACTED_TOKEN\]|[^\s,;{}\]]+)', r'\1[REDACTED_TOKEN]', text)
-    text = re.sub(r'(?i)\b(bearer\s+)(?:\[REDACTED_TOKEN\]|[a-zA-Z0-9_\-\.+/=]{20,})', r'\1[REDACTED_TOKEN]', text)
-    # Redact Namespace token formats: nsct_, nscw_, nscu_, tok_, st_ (word-bounded)
-    text = re.sub(r'\b(?:nsct_|nscw_|nscu_|tok_|st_)[A-Za-z0-9_\-\.]+', '[REDACTED_TOKEN]', text)
-    # Redact standalone JWT tokens (header.payload.sig)
-    text = re.sub(r'\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', '[REDACTED_JWT]', text)
     # Redact unquoted passwords as final defense-in-depth
-    text = re.sub(r'(?i)\b(password\s*[:=]\s*)(?:\[REDACTED_PASSWORD\]|[^\s,;{}\'"\\]+)', r'\1[REDACTED_PASSWORD]', text)
+    text = _replace_with_boundary(
+        text,
+        re.compile(r'(?i)(password\s*[:=]\s*)(?:\[REDACTED(?:[ _][A-Z_]+)*\](?:[A-Za-z0-9_./+=-][^\s,;{}\'"\\&]*)?|[^\s,;{}\'"\\&]+)'),
+        lambda match: f"{match.group(1)}[REDACTED_PASSWORD]",
+    )
     return text
 
 
@@ -860,7 +1128,7 @@ has_tenant_isolation_assertion = ('TenantIsolationVerified' in verified_attestat
 attestations = []
 
 if has_secret_scrubbing_assertion:
-    attestations.append("- **Secret Scrubbing:** All bearer tokens (`nsct_...`, `nscw_...`, `nscu_...`, `tok_...`, `st_...`), JWT federation assertions, mTLS private keys (EC, RSA, DSA, OpenSSH), passwords, and sensitive environment variables have been sanitized and redacted from log outputs (verified via passing test assertion).")
+    attestations.append("- **Secret Scrubbing:** All bearer tokens (`nsct_...`, `nscw_...`, `nscu_...`, `nsrt_...`, `tok_...`, `st_...`), JWT federation assertions, mTLS private keys (EC, RSA, DSA, OpenSSH), passwords, and sensitive environment variables have been sanitized and redacted from log outputs (verified via passing test assertion).")
 else:
     attestations.append("- **Secret Scrubbing:** ⚠️ Unverified: the authorized SecretScrubbingVerified evidence contract was not satisfied in this run.")
 

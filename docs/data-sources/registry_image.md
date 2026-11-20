@@ -42,8 +42,10 @@ output "image_digest" {
 ### Read-Only
 
 - `created_at` (String) RFC3339 creation timestamp.
+- `deleted_at` (String) RFC3339 deletion timestamp, if the image has been soft-deleted.
 - `digest` (String) Authoritative sha256 content digest for the image.
 - `expires_at` (String) RFC3339 expiration timestamp, if configured.
 - `id` (String) Unique identifier formatted as `<repository>@<digest>`.
+- `labels` (Map of String) Key-value labels attached to the image.
 - `size_bytes` (Number) Total size of the image in bytes.
 - `tags` (List of String) List of all tags pointing to this image digest, sorted alphabetically.

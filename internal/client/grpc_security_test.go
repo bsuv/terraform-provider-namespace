@@ -2,6 +2,7 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,11 +10,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,13 +24,13 @@ import (
 
 	"buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/cloud/iam/v1beta/iamv1betagrpc"
 	"buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/private/sessions/sessionsv1betagrpc"
+	githubv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/github/v1beta"
 	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
 	sessions "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/private/sessions"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 )
 
 type testEchoTokenServer struct {
@@ -180,22 +183,22 @@ func TestNewDefaultTLSConfig_EnforcesTLS12(t *testing.T) {
 }
 
 func TestTokenCredWrapper_TLSAlwaysRequiresTransportSecurity(t *testing.T) {
-	orig := grpcapi.RequireTransportSecurity
+	orig := RequireTransportSecurity
 	t.Cleanup(func() {
-		grpcapi.RequireTransportSecurity = orig
+		RequireTransportSecurity = orig
 	})
 
 	tlsCreds := credentials.NewTLS(newDefaultTLSConfig())
 	insecCreds := insecure.NewCredentials()
 
-	// 1. Even when grpcapi.RequireTransportSecurity is false, TLS creds keep RequireTransportSecurity() == true.
-	grpcapi.RequireTransportSecurity = false
+	// 1. Even when RequireTransportSecurity is false, TLS creds keep RequireTransportSecurity() == true.
+	RequireTransportSecurity = false
 
 	if shouldAllowInsecurePerRPCCreds(nil) {
 		t.Fatal("nil creds must not allow insecure per-RPC credentials")
 	}
 	if shouldAllowInsecurePerRPCCreds(tlsCreds) {
-		t.Fatal("TLS creds must not allow insecure per-RPC credentials even when grpcapi.RequireTransportSecurity is false")
+		t.Fatal("TLS creds must not allow insecure per-RPC credentials even when RequireTransportSecurity is false")
 	}
 
 	tlsWrapper := tokenCredWrapper{
@@ -203,29 +206,29 @@ func TestTokenCredWrapper_TLSAlwaysRequiresTransportSecurity(t *testing.T) {
 		allowInsecure: shouldAllowInsecurePerRPCCreds(tlsCreds),
 	}
 	if !tlsWrapper.RequireTransportSecurity() {
-		t.Fatal("TLS connection wrapper must return RequireTransportSecurity() == true when grpcapi.RequireTransportSecurity is false")
+		t.Fatal("TLS connection wrapper must return RequireTransportSecurity() == true when RequireTransportSecurity is false")
 	}
 
-	// Insecure creds with grpcapi.RequireTransportSecurity == false allow insecure (for bufconn tests).
+	// Insecure creds with RequireTransportSecurity == false allow insecure (for bufconn tests).
 	insecWrapperAllowed := tokenCredWrapper{
 		token:         StaticTokenSource{Token: "nsct_bufconn_secret"},
 		allowInsecure: shouldAllowInsecurePerRPCCreds(insecCreds),
 	}
 	if insecWrapperAllowed.RequireTransportSecurity() {
-		t.Fatal("insecure creds with grpcapi.RequireTransportSecurity == false should return RequireTransportSecurity() == false")
+		t.Fatal("insecure creds with RequireTransportSecurity == false should return RequireTransportSecurity() == false")
 	}
 
-	// 2. When grpcapi.RequireTransportSecurity is true, even insecure creds enforce RequireTransportSecurity() == true.
-	grpcapi.RequireTransportSecurity = true
+	// 2. When RequireTransportSecurity is true, even insecure creds enforce RequireTransportSecurity() == true.
+	RequireTransportSecurity = true
 	insecWrapperBlocked := tokenCredWrapper{
 		token:         StaticTokenSource{Token: "nsct_blocked_secret"},
 		allowInsecure: shouldAllowInsecurePerRPCCreds(insecCreds),
 	}
 	if !insecWrapperBlocked.RequireTransportSecurity() {
-		t.Fatal("insecure creds with grpcapi.RequireTransportSecurity == true must require transport security")
+		t.Fatal("insecure creds with RequireTransportSecurity == true must require transport security")
 	}
 
-	// Verify NewConnectionWithEndpointWithTransportCredentials rejects insecure per-RPC credentials when grpcapi.RequireTransportSecurity == true.
+	// Verify NewConnectionWithEndpointWithTransportCredentials rejects insecure per-RPC credentials when RequireTransportSecurity == true.
 	_, err := NewConnectionWithEndpointWithTransportCredentials(
 		context.Background(),
 		"https://127.0.0.1:443",
@@ -236,8 +239,8 @@ func TestTokenCredWrapper_TLSAlwaysRequiresTransportSecurity(t *testing.T) {
 		t.Fatalf("expected transport level security error when dialing insecure with RequireTransportSecurity=true, got: %v", err)
 	}
 
-	// 3. Verify end-to-end TLS gRPC connection succeeds with StaticTokenSource while grpcapi.RequireTransportSecurity == false.
-	grpcapi.RequireTransportSecurity = false
+	// 3. Verify end-to-end TLS gRPC connection succeeds with StaticTokenSource while RequireTransportSecurity == false.
+	RequireTransportSecurity = false
 	tlsCert, rootPool := generateLoopbackTestCert(t)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -299,13 +302,13 @@ func (s *testEchoSessionServer) IssueTenantTokenFromSession(ctx context.Context,
 }
 
 func TestSessionTokenSource_EnforcesTransportSecurityAndRejectsEmptyToken(t *testing.T) {
-	orig := grpcapi.RequireTransportSecurity
+	orig := RequireTransportSecurity
 	t.Cleanup(func() {
-		grpcapi.RequireTransportSecurity = orig
+		RequireTransportSecurity = orig
 	})
 
 	// 1. With RequireTransportSecurity=true and insecure creds, SessionTokenSource MUST refuse to send session tokens in cleartext.
-	grpcapi.RequireTransportSecurity = true
+	RequireTransportSecurity = true
 	insecSTS := NewSessionTokenSource("st_cleartext_must_not_send", "https://127.0.0.1:443", insecure.NewCredentials())
 	defer func() { _ = insecSTS.Close() }()
 
@@ -535,5 +538,188 @@ func TestSSRFSafeDialer_BlocksMetadataIPsAndPreservesValidatedHTTPSProxy(t *test
 	}
 	if echoSrv.gotAuth != "Bearer nsct_proxied_tls_token" {
 		t.Fatalf("expected server to receive Bearer token via proxy tunnel, got %q", echoSrv.gotAuth)
+	}
+}
+
+func TestHTTPConnectHandshake_ProxyAuth_Non200_BufferedConn_And_HTTPSProxy(t *testing.T) {
+	t.Run("Proxy-Authorization Basic header and bufferedConn.Read", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer func() { _ = clientConn.Close() }()
+		defer func() { _ = serverConn.Close() }()
+
+		gotProxyAuth := make(chan string, 1)
+		go func() {
+			br := bufio.NewReader(serverConn)
+			req, err := http.ReadRequest(br)
+			if err != nil {
+				gotProxyAuth <- "READ_ERR:" + err.Error()
+				return
+			}
+			gotProxyAuth <- req.Header.Get("Proxy-Authorization")
+			_, _ = io.WriteString(serverConn, "HTTP/1.1 200 Connection Established\r\n\r\nBUFFERED_PREFETCH:")
+			_, _ = io.WriteString(serverConn, "REST")
+			_ = serverConn.Close()
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		tunneled, err := performHTTPConnectHandshake(ctx, clientConn, "global.namespaceapis.com:443", "nsc-go/1", url.UserPassword("proxyuser", "proxypass"))
+		if err != nil {
+			t.Fatalf("performHTTPConnectHandshake failed: %v", err)
+		}
+		if authHdr := <-gotProxyAuth; authHdr != "Basic cHJveHl1c2VyOnByb3h5cGFzcw==" {
+			t.Fatalf("expected Basic Proxy-Authorization header, got %q", authHdr)
+		}
+		if _, ok := tunneled.(*bufferedConn); !ok {
+			t.Fatalf("expected *bufferedConn when response includes prefetched bytes, got %T", tunneled)
+		}
+		payload, readErr := io.ReadAll(tunneled)
+		if readErr != nil {
+			t.Fatalf("bufferedConn.Read failed: %v", readErr)
+		}
+		if string(payload) != "BUFFERED_PREFETCH:REST" {
+			t.Fatalf("expected buffered + socket payload %q, got %q", "BUFFERED_PREFETCH:REST", string(payload))
+		}
+	})
+
+	t.Run("Non-200 HTTP CONNECT response is rejected", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer func() { _ = clientConn.Close() }()
+		defer func() { _ = serverConn.Close() }()
+
+		go func() {
+			br := bufio.NewReader(serverConn)
+			_, _ = http.ReadRequest(br)
+			_, _ = io.WriteString(serverConn, "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := performHTTPConnectHandshake(ctx, clientConn, "global.namespaceapis.com:443", "nsc-go/1", nil)
+		if err == nil || !strings.Contains(err.Error(), "407") {
+			t.Fatalf("expected 407 HTTP CONNECT rejection, got: %v", err)
+		}
+	})
+
+	t.Run("HTTPS proxy dialer performs TLS handshake and rejects blocked proxy host", func(t *testing.T) {
+		blockedDial := newProxySSRFSafeDialer(&url.URL{Scheme: "https", Host: "169.254.169.254"}, "global.namespaceapis.com:443", "nsc-go/1")
+		if _, err := blockedDial(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "proxy host rejected") {
+			t.Fatalf("expected blocked HTTPS proxy host error, got: %v", err)
+		}
+
+		tlsCert, _ := generateLoopbackTestCert(t)
+		ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{tlsCert},
+		})
+		if err != nil {
+			t.Fatalf("failed to start TLS proxy listener: %v", err)
+		}
+		defer func() { _ = ln.Close() }()
+
+		go func() {
+			conn, acceptErr := ln.Accept()
+			if acceptErr == nil && conn != nil {
+				_ = conn.(*tls.Conn).Handshake()
+				_ = conn.Close()
+			}
+		}()
+
+		proxyURL := &url.URL{Scheme: "https", Host: ln.Addr().String()}
+		dialFn := newProxySSRFSafeDialer(proxyURL, "global.namespaceapis.com:443", "nsc-go/1")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := dialFn(ctx, ""); err == nil || !strings.Contains(err.Error(), "proxy TLS handshake failed") {
+			t.Fatalf("expected proxy TLS handshake error for untrusted test cert, got: %v", err)
+		}
+	})
+}
+
+func TestRedactingUnaryInterceptor_MultilineJSONEscapedSecrets(t *testing.T) {
+	t.Parallel()
+
+	sampleJWT := "ey" + "JhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+		"ey" + "JzdWIiOiIxMjM0NTY3ODkwIn0." +
+		"SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+	specFileSecret := "/run/secrets/multiline_spec.json"
+	passwordSecret := "multiline_pw_secret"
+	nsrtSecret := "nsrt_" + "multiline_revokable_123456"
+	oidcJWT := "oidc_" + sampleJWT
+	dockerfilePass := "docker_build_pw_999"
+
+	req := &githubv1beta.CreateProfileRequest{
+		Spec: &githubv1beta.RunnerProfileSpec{
+			Tag: "probe",
+			Description: strings.Join([]string{
+				"line1",
+				"NSC_TOKEN_SPEC_FILE=" + specFileSecret,
+				"password=" + passwordSecret,
+				nsrtSecret,
+				oidcJWT,
+				"https://example.invalid/auth?token=tok123&password=" + passwordSecret + "&safe=1",
+			}, "\n"),
+			CustomRunnerImageSpec: &githubv1beta.CustomRunnerImageSpec{
+				DockerSpec: &githubv1beta.DockerBaseImageSpec{
+					DockerfileContent: "FROM alpine:3.19\nENV password=" + dockerfilePass + "\nENV " + nsrtSecret + "\n",
+				},
+			},
+		},
+	}
+
+	var logBuf bytes.Buffer
+	syncWriter := NewSynchronizedRedactingWriter(&logBuf)
+	interceptor := RedactingUnaryInterceptor(syncWriter, true, false, "https://global.namespaceapis.com:443")
+
+	err := interceptor(
+		context.Background(),
+		"/namespace.cloud.github.v1beta.ProfileService/CreateProfile",
+		req,
+		&githubv1beta.CreateProfileResponse{},
+		nil,
+		func(context.Context, string, any, any, *grpc.ClientConn, ...grpc.CallOption) error {
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("interceptor returned unexpected error: %v", err)
+	}
+
+	logged := logBuf.String()
+	for _, secret := range []string{
+		specFileSecret,
+		passwordSecret,
+		nsrtSecret,
+		oidcJWT,
+		sampleJWT,
+		dockerfilePass,
+		"tok123",
+	} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("SECURITY LEAK: RedactingUnaryInterceptor logged raw secret %q in:\n%s", secret, logged)
+		}
+	}
+
+	var payloadLine string
+	for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+		if strings.HasPrefix(line, "[DEBUG] Payload: ") {
+			payloadLine = strings.TrimPrefix(line, "[DEBUG] Payload: ")
+			break
+		}
+	}
+	if payloadLine == "" {
+		t.Fatalf("expected [DEBUG] Payload line in:\n%s", logged)
+	}
+	if !json.Valid([]byte(payloadLine)) {
+		t.Fatalf("redacted [DEBUG] Payload JSON is invalid: %s", payloadLine)
+	}
+	if !strings.Contains(payloadLine, "NSC_TOKEN_SPEC_FILE=[REDACTED]") ||
+		!strings.Contains(payloadLine, "[REDACTED TOKEN]") ||
+		!strings.Contains(payloadLine, "[REDACTED JWT]") ||
+		!strings.Contains(payloadLine, "password=[REDACTED PASSWORD]") ||
+		!strings.Contains(payloadLine, "safe=1") {
+		t.Fatalf("expected redaction markers and preserved safe=1 param in payload JSON: %s", payloadLine)
+	}
+	if second := RedactSecrets(logged); second != logged {
+		t.Fatalf("logged interceptor output is not 2-pass idempotent:\nfirst:  %s\nsecond: %s", logged, second)
 	}
 }

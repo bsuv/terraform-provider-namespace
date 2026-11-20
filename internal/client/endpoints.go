@@ -10,7 +10,6 @@ import (
 	endpointutil "github.com/bsuv/terraform-provider-namespace/internal/endpoint"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"namespacelabs.dev/integrations/api"
 )
 
 const (
@@ -29,7 +28,7 @@ type EndpointPool struct {
 	computeEndpoint string
 	version         string
 
-	tokenSource api.TokenSource
+	tokenSource TokenSource
 	dialOpts    []grpc.DialOption
 	creds       credentials.TransportCredentials
 
@@ -44,7 +43,7 @@ type EndpointConfig struct {
 	IAMEndpoint     string
 	ComputeEndpoint string
 	Version         string
-	TokenSource     api.TokenSource
+	TokenSource     TokenSource
 	DialOptions     []grpc.DialOption
 	Creds           credentials.TransportCredentials // Optional, defaults to TLS
 }

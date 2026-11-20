@@ -24,8 +24,16 @@ ephemeral "namespace_tenant_token" "ci" {
 
   policies = [
     {
-      policy_type = "namespace.cloud.iam.v1beta.RunnerProfilePolicy"
-      value       = jsonencode({ allow_read = true })
+      policy_type = "namespace.cloud.compute.v1beta.UsagePolicy"
+      value = jsonencode({
+        concurrency_limits = {
+          max_cpu       = 8
+          max_memory_mb = 16384
+        }
+        usage_limits = {
+          builds = 50
+        }
+      })
     }
   ]
 }

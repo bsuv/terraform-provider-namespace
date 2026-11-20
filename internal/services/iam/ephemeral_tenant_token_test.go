@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -435,7 +436,7 @@ func TestTenantTokenEphemeralResource_Open_DeferralUnknownNestedPolicies(t *test
 
 	policiesList, diags := types.ListValueFrom(ctx, iam.TenantTokenPolicyObjectType, []iam.TenantTokenPolicyModel{
 		{
-			PolicyType: types.StringValue("namespace.cloud.iam.v1beta.AdminPolicy"),
+			PolicyType: types.StringValue("namespace.cloud.compute.v1beta.UsagePolicy"),
 			Value:      types.StringUnknown(),
 		},
 	})
@@ -1073,4 +1074,191 @@ func TestTenantTokenEphemeralResource_Open_KnownGrants_UnknownActionElement_Defe
 	if !found {
 		t.Fatalf("expected error summary 'Unknown Access Grant Configuration', got: %v", openResp.Diagnostics.Errors())
 	}
+}
+
+func TestTenantTokenEphemeralResource_Open_UnknownAndNullListElements(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Unknown policy element defers when DeferralAllowed=true and errors cleanly when false", func(t *testing.T) {
+		apiCalls := 0
+		srv := testutil.NewMockServer()
+		srv.Token.IssueTenantTokenFunc = func(ctx context.Context, req *iamv1beta.IssueTenantTokenRequest) (*iamv1beta.IssueTenantTokenResponse, error) {
+			apiCalls++
+			return &iamv1beta.IssueTenantTokenResponse{BearerToken: "should-not-be-called"}, nil
+		}
+		r, schemaResp := setupTestTenantTokenEphemeralResource(t, srv)
+
+		policiesList := types.ListValueMust(iam.TenantTokenPolicyObjectType, []attr.Value{
+			types.ObjectUnknown(iam.TenantTokenPolicyAttrTypes),
+		})
+		inputModel := iam.TenantTokenEphemeralModel{
+			TenantID:     types.StringValue("tenant_123"),
+			ActorID:      types.StringValue("actor_456"),
+			DurationSecs: types.Int64Value(3600),
+			Policies:     policiesList,
+			Access:       types.ObjectNull(iam.AccessPolicyAttrTypes),
+			BearerToken:  types.StringNull(),
+		}
+		stateVal := tfsdk.State{Schema: schemaResp.Schema}
+		if diags := stateVal.Set(ctx, &inputModel); diags.HasError() {
+			t.Fatalf("failed to prepare config: %v", diags)
+		}
+
+		var deferResp ephemeral.OpenResponse
+		deferResp.Result = tfsdk.EphemeralResultData{Schema: schemaResp.Schema}
+		r.Open(ctx, ephemeral.OpenRequest{
+			Config:             tfsdk.Config{Schema: schemaResp.Schema, Raw: stateVal.Raw},
+			ClientCapabilities: ephemeral.OpenClientCapabilities{DeferralAllowed: true},
+		}, &deferResp)
+		if deferResp.Diagnostics.HasError() {
+			t.Fatalf("unexpected diagnostics with DeferralAllowed=true: %v", deferResp.Diagnostics)
+		}
+		if deferResp.Deferred == nil || deferResp.Deferred.Reason != ephemeral.DeferredReasonEphemeralResourceConfigUnknown {
+			t.Fatalf("expected deferral on unknown policy list element, got: %v", deferResp.Deferred)
+		}
+
+		var errResp ephemeral.OpenResponse
+		errResp.Result = tfsdk.EphemeralResultData{Schema: schemaResp.Schema}
+		r.Open(ctx, ephemeral.OpenRequest{
+			Config:             tfsdk.Config{Schema: schemaResp.Schema, Raw: stateVal.Raw},
+			ClientCapabilities: ephemeral.OpenClientCapabilities{DeferralAllowed: false},
+		}, &errResp)
+		if !errResp.Diagnostics.HasError() {
+			t.Fatal("expected error when DeferralAllowed=false")
+		}
+		for _, d := range errResp.Diagnostics.Errors() {
+			if strings.Contains(d.Summary(), "Value Conversion Error") {
+				t.Fatalf("unexpected Value Conversion Error: %s: %s", d.Summary(), d.Detail())
+			}
+		}
+		if apiCalls != 0 {
+			t.Fatalf("expected 0 API calls, got %d", apiCalls)
+		}
+	})
+
+	t.Run("Unknown grant element defers when DeferralAllowed=true and errors cleanly when false", func(t *testing.T) {
+		apiCalls := 0
+		srv := testutil.NewMockServer()
+		srv.Token.IssueTenantTokenFunc = func(ctx context.Context, req *iamv1beta.IssueTenantTokenRequest) (*iamv1beta.IssueTenantTokenResponse, error) {
+			apiCalls++
+			return &iamv1beta.IssueTenantTokenResponse{BearerToken: "should-not-be-called"}, nil
+		}
+		r, schemaResp := setupTestTenantTokenEphemeralResource(t, srv)
+
+		grantsList := types.ListValueMust(iam.AccessGrantPermissionObjectType, []attr.Value{
+			types.ObjectUnknown(iam.AccessGrantPermissionAttrTypes),
+		})
+		accessObj, diags := types.ObjectValueFrom(ctx, iam.AccessPolicyAttrTypes, iam.AccessPolicyModel{
+			Grants: grantsList,
+		})
+		if diags.HasError() {
+			t.Fatalf("failed to create access object: %v", diags)
+		}
+
+		inputModel := iam.TenantTokenEphemeralModel{
+			TenantID:     types.StringValue("tenant_123"),
+			ActorID:      types.StringValue("actor_456"),
+			DurationSecs: types.Int64Value(3600),
+			Policies:     types.ListNull(iam.TenantTokenPolicyObjectType),
+			Access:       accessObj,
+			BearerToken:  types.StringNull(),
+		}
+		stateVal := tfsdk.State{Schema: schemaResp.Schema}
+		if diags := stateVal.Set(ctx, &inputModel); diags.HasError() {
+			t.Fatalf("failed to prepare config: %v", diags)
+		}
+
+		var deferResp ephemeral.OpenResponse
+		deferResp.Result = tfsdk.EphemeralResultData{Schema: schemaResp.Schema}
+		r.Open(ctx, ephemeral.OpenRequest{
+			Config:             tfsdk.Config{Schema: schemaResp.Schema, Raw: stateVal.Raw},
+			ClientCapabilities: ephemeral.OpenClientCapabilities{DeferralAllowed: true},
+		}, &deferResp)
+		if deferResp.Diagnostics.HasError() {
+			t.Fatalf("unexpected diagnostics with DeferralAllowed=true: %v", deferResp.Diagnostics)
+		}
+		if deferResp.Deferred == nil || deferResp.Deferred.Reason != ephemeral.DeferredReasonEphemeralResourceConfigUnknown {
+			t.Fatalf("expected deferral on unknown grant list element, got: %v", deferResp.Deferred)
+		}
+
+		var errResp ephemeral.OpenResponse
+		errResp.Result = tfsdk.EphemeralResultData{Schema: schemaResp.Schema}
+		r.Open(ctx, ephemeral.OpenRequest{
+			Config:             tfsdk.Config{Schema: schemaResp.Schema, Raw: stateVal.Raw},
+			ClientCapabilities: ephemeral.OpenClientCapabilities{DeferralAllowed: false},
+		}, &errResp)
+		if !errResp.Diagnostics.HasError() {
+			t.Fatal("expected error when DeferralAllowed=false")
+		}
+		for _, d := range errResp.Diagnostics.Errors() {
+			if strings.Contains(d.Summary(), "Value Conversion Error") {
+				t.Fatalf("unexpected Value Conversion Error: %s: %s", d.Summary(), d.Detail())
+			}
+		}
+		if apiCalls != 0 {
+			t.Fatalf("expected 0 API calls, got %d", apiCalls)
+		}
+	})
+
+	t.Run("Null policy and grant elements are skipped without Value Conversion Error", func(t *testing.T) {
+		var capturedReq *iamv1beta.IssueTenantTokenRequest
+		srv := testutil.NewMockServer()
+		srv.Token.IssueTenantTokenFunc = func(ctx context.Context, req *iamv1beta.IssueTenantTokenRequest) (*iamv1beta.IssueTenantTokenResponse, error) {
+			capturedReq = req
+			return &iamv1beta.IssueTenantTokenResponse{BearerToken: "nsct_null_elem_ok"}, nil
+		}
+		r, schemaResp := setupTestTenantTokenEphemeralResource(t, srv)
+
+		policiesList := types.ListValueMust(iam.TenantTokenPolicyObjectType, []attr.Value{
+			types.ObjectNull(iam.TenantTokenPolicyAttrTypes),
+			types.ObjectValueMust(iam.TenantTokenPolicyAttrTypes, map[string]attr.Value{
+				"policy_type": types.StringValue("namespace.cloud.compute.v1beta.UsagePolicy"),
+				"value":       types.StringValue(`{"usage_limits":{"builds":5}}`),
+			}),
+		})
+		grantsList := types.ListValueMust(iam.AccessGrantPermissionObjectType, []attr.Value{
+			types.ObjectNull(iam.AccessGrantPermissionAttrTypes),
+			types.ObjectValueMust(iam.AccessGrantPermissionAttrTypes, map[string]attr.Value{
+				"resource_type": types.StringValue("compute"),
+				"resource_id":   types.StringValue("inst_1"),
+				"actions":       types.ListValueMust(types.StringType, []attr.Value{types.StringNull(), types.StringValue("read")}),
+			}),
+		})
+		accessObj, diags := types.ObjectValueFrom(ctx, iam.AccessPolicyAttrTypes, iam.AccessPolicyModel{
+			Grants: grantsList,
+		})
+		if diags.HasError() {
+			t.Fatalf("failed to create access object: %v", diags)
+		}
+
+		inputModel := iam.TenantTokenEphemeralModel{
+			TenantID:     types.StringValue("tenant_123"),
+			ActorID:      types.StringValue("actor_456"),
+			DurationSecs: types.Int64Value(3600),
+			Policies:     policiesList,
+			Access:       accessObj,
+			BearerToken:  types.StringNull(),
+		}
+		stateVal := tfsdk.State{Schema: schemaResp.Schema}
+		if diags := stateVal.Set(ctx, &inputModel); diags.HasError() {
+			t.Fatalf("failed to prepare config: %v", diags)
+		}
+
+		var openResp ephemeral.OpenResponse
+		openResp.Result = tfsdk.EphemeralResultData{Schema: schemaResp.Schema}
+		r.Open(ctx, ephemeral.OpenRequest{
+			Config:             tfsdk.Config{Schema: schemaResp.Schema, Raw: stateVal.Raw},
+			ClientCapabilities: ephemeral.OpenClientCapabilities{DeferralAllowed: true},
+		}, &openResp)
+		if openResp.Diagnostics.HasError() {
+			t.Fatalf("unexpected diagnostics: %v", openResp.Diagnostics)
+		}
+		if capturedReq == nil || len(capturedReq.Policies) != 1 || len(capturedReq.GetAccess().GetGrants()) != 1 {
+			t.Fatalf("expected 1 policy and 1 grant after skipping nulls, got req=%+v", capturedReq)
+		}
+		gotActions := capturedReq.GetAccess().GetGrants()[0].GetActions()
+		if len(gotActions) != 1 || gotActions[0] != "read" {
+			t.Fatalf("expected actions=[read] after skipping null action element, got %v", gotActions)
+		}
+	})
 }

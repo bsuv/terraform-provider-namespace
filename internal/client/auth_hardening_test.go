@@ -83,11 +83,12 @@ func TestResolveTenantFromToken_InlinePrefixesNeverProbeFilesystem(t *testing.T)
 	diskFileContent := []byte(fmt.Sprintf(`{"bearer_token": %q}`, diskJWT))
 
 	inlinePrefixes := []string{
-		"nsct_opaque_probe_test",
-		"st_opaque_probe_test",
-		"nscw_opaque_probe_test",
-		"nscu_opaque_probe_test",
-		"tok_opaque_probe_test",
+		"nsct_" + "opaque_probe_test",
+		"st_" + "opaque_probe_test",
+		"nscw_" + "opaque_probe_test",
+		"nscu_" + "opaque_probe_test",
+		"nsrt_" + "opaque_probe_test",
+		"tok_" + "opaque_probe_test",
 	}
 	for _, name := range inlinePrefixes {
 		if err := os.WriteFile(filepath.Join(tmpDir, name), diskFileContent, 0600); err != nil {
@@ -113,6 +114,43 @@ func TestResolveTenantFromToken_InlinePrefixesNeverProbeFilesystem(t *testing.T)
 	}
 	if tenant != "inline-tenant" {
 		t.Fatalf("expected inline-tenant (without reading file on disk), got %q", tenant)
+	}
+
+	// Prefixed 3-part JWTs (oidc_eyJ..., cognito_eyJ..., github-actions_eyJ...) must NEVER probe os.Stat in CWD:
+	// (a) without a tenant claim -> must fail closed instead of reading matching disk file
+	noTenantJWT := createTestJWT(map[string]interface{}{"aud": "api"})
+	for _, prefix := range []string{"oidc_", "cognito_", "github-actions_"} {
+		tok := prefix + noTenantJWT
+		if err := os.WriteFile(filepath.Join(tmpDir, tok), diskFileContent, 0600); err != nil {
+			t.Fatalf("failed to write prefixed no-tenant JWT file %s: %v", tok, err)
+		}
+		gotTenant, err := client.ResolveTenantFromToken(tok)
+		if err == nil {
+			t.Fatalf("expected prefixed JWT %q without tenant claim to fail instead of reading disk file (got %q)", tok, gotTenant)
+		}
+		if !strings.Contains(err.Error(), "does not contain a supported tenant identity claim") {
+			t.Fatalf("expected missing tenant claim error for %q, got: %v", tok, err)
+		}
+	}
+
+	// (b) with a tenant claim -> must resolve the inline claim, NOT disk-tenant
+	for _, prefix := range []string{"oidc_", "cognito_", "github-actions_"} {
+		tok := prefix + inlineJWT
+		if err := os.WriteFile(filepath.Join(tmpDir, tok), diskFileContent, 0600); err != nil {
+			t.Fatalf("failed to write prefixed JWT file %s: %v", tok, err)
+		}
+		gotTenant, err := client.ResolveTenantFromToken(tok)
+		if err != nil {
+			t.Fatalf("expected prefixed inline JWT %q to succeed, got: %v", tok, err)
+		}
+		if gotTenant != "inline-tenant" {
+			t.Fatalf("expected inline-tenant for %q (not disk-tenant), got %q", tok, gotTenant)
+		}
+		// Explicit relative path with separator MUST still read the file on disk
+		gotFromPath, err := client.ResolveTenantFromToken("." + string(filepath.Separator) + tok)
+		if err != nil || gotFromPath != "disk-tenant" {
+			t.Fatalf("expected path-separated %q to read disk-tenant, got %q (err=%v)", "."+string(filepath.Separator)+tok, gotFromPath, err)
+		}
 	}
 }
 
@@ -219,5 +257,15 @@ func TestResolveTenantFromToken_SessionTokenPrecedenceAndConflict(t *testing.T) 
 	resolved, err := client.ResolveTenantFromToken(matchingPath)
 	if err != nil || resolved != "safe-test-tenant" {
 		t.Fatalf("expected matching dual-field file to resolve to safe-test-tenant, got %q (err=%v)", resolved, err)
+	}
+
+	// 4. Valid session_token paired with unverifiable opaque bearer_token MUST fail closed.
+	unverifiableBearerPath := filepath.Join(tmpDir, "unverifiable_bearer.json")
+	unverifiablePayload := fmt.Sprintf(`{"bearer_token": %q, "session_token": "st_%s"}`, "nsct_"+"opaque_unverifiable", testTenantJWT)
+	if err := os.WriteFile(unverifiableBearerPath, []byte(unverifiablePayload), 0600); err != nil {
+		t.Fatalf("failed to write unverifiable bearer token file: %v", err)
+	}
+	if _, err := client.ResolveTenantFromToken(unverifiableBearerPath); err == nil || !strings.Contains(err.Error(), "unverifiable bearer_token") {
+		t.Fatalf("expected unverifiable bearer_token error, got: %v", err)
 	}
 }

@@ -113,7 +113,7 @@ func (d *baseImagesDataSource) Schema(ctx context.Context, req datasource.Schema
 									Computed:    true,
 								},
 								"os": schema.StringAttribute{
-									Description: "Compute OS family (`linux`, `macos`).",
+									Description: "Compute OS family (`linux`, `macos`, `windows`).",
 									Computed:    true,
 								},
 								"os_name": schema.StringAttribute{
@@ -202,9 +202,35 @@ func (d *baseImagesDataSource) Read(ctx context.Context, req datasource.ReadRequ
 	var unknownAttributes []string
 	if config.Labels.IsUnknown() {
 		unknownAttributes = append(unknownAttributes, "labels")
+	} else if !config.Labels.IsNull() {
+		var labelVals []types.String
+		dLabels := config.Labels.ElementsAs(ctx, &labelVals, false)
+		resp.Diagnostics.Append(dLabels...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		for _, lv := range labelVals {
+			if lv.IsUnknown() {
+				unknownAttributes = append(unknownAttributes, "labels")
+				break
+			}
+		}
 	}
 	if config.ReleaseStages.IsUnknown() {
 		unknownAttributes = append(unknownAttributes, "release_stages")
+	} else if !config.ReleaseStages.IsNull() {
+		var stageVals []types.String
+		dStageVals := config.ReleaseStages.ElementsAs(ctx, &stageVals, false)
+		resp.Diagnostics.Append(dStageVals...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		for _, sv := range stageVals {
+			if sv.IsUnknown() {
+				unknownAttributes = append(unknownAttributes, "release_stages")
+				break
+			}
+		}
 	}
 	if tfutil.DeferDataSourceReadIfUnknown(req, resp, unknownAttributes...) {
 		return
@@ -214,6 +240,9 @@ func (d *baseImagesDataSource) Read(ctx context.Context, req datasource.ReadRequ
 
 	labels, dList := tfToStringSlice(ctx, config.Labels)
 	resp.Diagnostics.Append(dList...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	if len(labels) > 0 {
 		rpcReq.Labels = &stdlib.StringMatcher{
 			Values: labels,
@@ -223,6 +252,9 @@ func (d *baseImagesDataSource) Read(ctx context.Context, req datasource.ReadRequ
 
 	stages, dStages := tfToStringSlice(ctx, config.ReleaseStages)
 	resp.Diagnostics.Append(dStages...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	for _, stage := range stages {
 		val, ok := imagesv1beta.ReleaseStage_value[stage]
 		if !ok {

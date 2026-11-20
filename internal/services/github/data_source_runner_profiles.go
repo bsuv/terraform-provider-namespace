@@ -94,8 +94,29 @@ func (d *runnerProfilesDataSource) Schema(ctx context.Context, req datasource.Sc
 							Computed:    true,
 						},
 						"access_level": schema.StringAttribute{
-							Description: "Controls which Namespace features the runner workload can access (`ACCESS_LEVEL_UNSPECIFIED`, `ACCESS_LEVEL_PERMISSIVE`, `ACCESS_LEVEL_LIMITED`, `ACCESS_LEVEL_RESTRICTED`).",
+							Description: "Controls which Namespace features the runner workload can access (`ACCESS_LEVEL_UNSPECIFIED`, `ACCESS_LEVEL_PERMISSIVE`, `ACCESS_LEVEL_LIMITED`, `ACCESS_LEVEL_RESTRICTED`, `ACCESS_LEVEL_CUSTOM`).",
 							Computed:    true,
+						},
+						"custom_permissions": schema.ListNestedAttribute{
+							Description: "Granular IAM permission grants when `access_level` is `ACCESS_LEVEL_CUSTOM`.",
+							Computed:    true,
+							NestedObject: schema.NestedAttributeObject{
+								Attributes: map[string]schema.Attribute{
+									"resource_type": schema.StringAttribute{
+										Description: "Resource type identifier (e.g. `vault/object`, `cache/bazel`).",
+										Computed:    true,
+									},
+									"resource_id": schema.StringAttribute{
+										Description: "Target resource identifier, or empty string `\"\"` for all resources of this type.",
+										Computed:    true,
+									},
+									"actions": schema.ListAttribute{
+										Description: "List of allowed action strings.",
+										ElementType: types.StringType,
+										Computed:    true,
+									},
+								},
+							},
 						},
 						"experimental_features": schema.ListAttribute{
 							Description: "List of experimental feature flags enabled for this runner profile.",
@@ -119,7 +140,7 @@ func (d *runnerProfilesDataSource) Schema(ctx context.Context, req datasource.Sc
 									Computed:    true,
 								},
 								"os": schema.StringAttribute{
-									Description: "Compute OS family (`linux`, `macos`).",
+									Description: "Compute OS family (`linux`, `macos`, `windows`).",
 									Computed:    true,
 								},
 								"selectors": schema.ListNestedAttribute{
@@ -145,10 +166,6 @@ func (d *runnerProfilesDataSource) Schema(ctx context.Context, req datasource.Sc
 							Computed:    true,
 							NestedObject: schema.NestedAttributeObject{
 								Attributes: map[string]schema.Attribute{
-									"volume_tag": schema.StringAttribute{
-										Description: "Unique identifier for this cache volume within the profile.",
-										Computed:    true,
-									},
 									"volume_size_gb": schema.Int64Attribute{
 										Description: "Total size of the cache volume in gigabytes.",
 										Computed:    true,

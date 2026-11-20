@@ -37,10 +37,24 @@ output "image_count" {
 
 - `repository` (String) Name of the container registry repository to list images from.
 
+### Optional
+
+- `deletion_filter` (String) Controls whether deleted images are included (`DELETION_FILTER_UNSPECIFIED`, `INCLUDE_DELETED`, `EXCLUDE_DELETED`).
+- `expires_at` (Attributes) Optional exclusive RFC3339 expiration timestamp range filter. When either bound is set, images that never expire are excluded. (see [below for nested schema](#nestedatt--expires_at))
+
 ### Read-Only
 
 - `id` (String) Identifier for this image list query, matching the repository name.
 - `images` (Attributes List) List of container images in the repository, sorted deterministically. (see [below for nested schema](#nestedatt--images))
+
+<a id="nestedatt--expires_at"></a>
+### Nested Schema for `expires_at`
+
+Optional:
+
+- `after` (String) Include images expiring strictly after this RFC3339 timestamp.
+- `before` (String) Include images expiring strictly before this RFC3339 timestamp.
+
 
 <a id="nestedatt--images"></a>
 ### Nested Schema for `images`
@@ -48,8 +62,10 @@ output "image_count" {
 Read-Only:
 
 - `created_at` (String) RFC3339 creation timestamp.
+- `deleted_at` (String) RFC3339 deletion timestamp, if the image has been soft-deleted.
 - `digest` (String) Image sha256 digest.
 - `expires_at` (String) RFC3339 expiration timestamp, if set.
+- `labels` (Map of String) Key-value labels attached to the image.
 - `repository` (String) Repository name.
 - `size_bytes` (Number) Total image size in bytes.
 - `tags` (List of String) Tags associated with this image digest, sorted alphabetically.

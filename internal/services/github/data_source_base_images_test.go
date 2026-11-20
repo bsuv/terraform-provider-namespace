@@ -9,6 +9,7 @@ import (
 	imagesv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/private/images"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	dschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"google.golang.org/grpc/codes"
@@ -149,6 +150,13 @@ func TestBaseImagesDataSource_Schema(t *testing.T) {
 	}
 	if _, exists := attrs["images"]; !exists {
 		t.Error("missing 'images' attribute in base images data source schema")
+	}
+
+	imagesAttr := attrs["images"].(dschema.ListNestedAttribute)
+	specAttr := imagesAttr.NestedObject.Attributes["spec"].(dschema.SingleNestedAttribute)
+	osAttr := specAttr.Attributes["os"].(dschema.StringAttribute)
+	if !strings.Contains(strings.ToLower(osAttr.Description), "windows") {
+		t.Errorf("expected images.*.spec.os description to include 'windows', got %q", osAttr.Description)
 	}
 }
 
@@ -433,5 +441,233 @@ func TestBaseImagesDataSource_Read_DeterministicPackageSorting(t *testing.T) {
 	}
 	if pkgs[3].Name.ValueString() != "zlib" {
 		t.Errorf("pkg 3 mismatch: %v", pkgs[3].Name.ValueString())
+	}
+}
+
+func TestBaseImagesDataSource_Read_WindowsOS(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	srv.Image.ListBaseImagesFunc = func(ctx context.Context, req *githubv1beta.ListBaseImagesRequest) (*githubv1beta.ListBaseImagesResponse, error) {
+		return &githubv1beta.ListBaseImagesResponse{
+			Images: []*githubv1beta.RunnerBaseImage{
+				{
+					Label:    "windows-2022",
+					ImageRef: "nscr.io/official/windows-2022:latest",
+					Title:    "Windows Server 2022",
+					Spec: &imagesv1beta.BaseImage{
+						Id:           "img_win2022",
+						Os:           "windows",
+						OsName:       "Windows Server",
+						OsVersion:    "2022",
+						Description:  "Windows Server 2022",
+						ReleaseStage: imagesv1beta.ReleaseStage_PRODUCTION,
+					},
+				},
+			},
+		}, nil
+	}
+
+	d, schemaResp := setupTestDataSourceBaseImages(t, srv)
+	configModel := github.BaseImagesDataSourceModel{
+		ID:            types.StringNull(),
+		Labels:        types.ListNull(types.StringType),
+		ReleaseStages: types.ListNull(types.StringType),
+		Images:        nil,
+	}
+	configState := tfsdk.State{Schema: schemaResp.Schema}
+	_ = configState.Set(ctx, &configModel)
+
+	resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	d.Read(ctx, datasource.ReadRequest{Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: configState.Raw}}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected read errors: %v", resp.Diagnostics)
+	}
+
+	var stateResult github.BaseImagesDataSourceModel
+	_ = resp.State.Get(ctx, &stateResult)
+	if len(stateResult.Images) != 1 || stateResult.Images[0].Spec == nil || stateResult.Images[0].Spec.OS.ValueString() != "windows" {
+		t.Fatalf("expected spec.os 'windows', got %+v", stateResult.Images)
+	}
+}
+
+func TestBaseImagesDataSource_Read_UnknownListElements(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name            string
+		labels          []attr.Value
+		stages          []attr.Value
+		deferralAllowed bool
+	}{
+		{
+			name:            "unknown label element with deferral allowed",
+			labels:          []attr.Value{types.StringUnknown()},
+			deferralAllowed: true,
+		},
+		{
+			name:            "unknown label element with deferral disallowed",
+			labels:          []attr.Value{types.StringUnknown()},
+			deferralAllowed: false,
+		},
+		{
+			name:            "unknown release_stage element with deferral allowed",
+			stages:          []attr.Value{types.StringUnknown()},
+			deferralAllowed: true,
+		},
+		{
+			name:            "unknown release_stage element with deferral disallowed",
+			stages:          []attr.Value{types.StringUnknown()},
+			deferralAllowed: false,
+		},
+		{
+			name:            "mixed known and unknown label elements with deferral allowed",
+			labels:          []attr.Value{types.StringValue("ubuntu-24.04"), types.StringUnknown()},
+			deferralAllowed: true,
+		},
+		{
+			name:            "mixed null and unknown release_stage elements with deferral disallowed",
+			stages:          []attr.Value{types.StringNull(), types.StringUnknown()},
+			deferralAllowed: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := testutil.NewMockServer()
+			rpcCalled := false
+			srv.Image.ListBaseImagesFunc = func(ctx context.Context, req *githubv1beta.ListBaseImagesRequest) (*githubv1beta.ListBaseImagesResponse, error) {
+				rpcCalled = true
+				return &githubv1beta.ListBaseImagesResponse{Images: sampleBaseImages()}, nil
+			}
+
+			d, schemaResp := setupTestDataSourceBaseImages(t, srv)
+
+			labelsList := types.ListNull(types.StringType)
+			if tc.labels != nil {
+				lv, diags := types.ListValue(types.StringType, tc.labels)
+				if diags.HasError() {
+					t.Fatalf("failed to construct labels list: %v", diags)
+				}
+				labelsList = lv
+			}
+
+			stagesList := types.ListNull(types.StringType)
+			if tc.stages != nil {
+				sv, diags := types.ListValue(types.StringType, tc.stages)
+				if diags.HasError() {
+					t.Fatalf("failed to construct release_stages list: %v", diags)
+				}
+				stagesList = sv
+			}
+
+			configModel := github.BaseImagesDataSourceModel{
+				ID:            types.StringNull(),
+				Labels:        labelsList,
+				ReleaseStages: stagesList,
+				Images:        nil,
+			}
+
+			configState := tfsdk.State{Schema: schemaResp.Schema}
+			if diags := configState.Set(ctx, &configModel); diags.HasError() {
+				t.Fatalf("failed to set config: %v", diags)
+			}
+
+			req := datasource.ReadRequest{
+				Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: configState.Raw},
+				ClientCapabilities: datasource.ReadClientCapabilities{
+					DeferralAllowed: tc.deferralAllowed,
+				},
+			}
+			resp := &datasource.ReadResponse{
+				State: tfsdk.State{Schema: schemaResp.Schema},
+			}
+
+			d.Read(ctx, req, resp)
+
+			if rpcCalled {
+				t.Fatal("expected ListBaseImages RPC not to be called when config contains unknown list element")
+			}
+
+			if tc.deferralAllowed {
+				if resp.Diagnostics.HasError() {
+					t.Fatalf("expected no error diagnostics when deferral is allowed, got: %v", resp.Diagnostics)
+				}
+				if resp.Deferred == nil {
+					t.Fatal("expected resp.Deferred to be non-nil when deferral is allowed")
+				}
+			} else {
+				if resp.Deferred != nil {
+					t.Fatalf("expected resp.Deferred to be nil when deferral is disallowed, got: %+v", resp.Deferred)
+				}
+				if !resp.Diagnostics.HasError() {
+					t.Fatal("expected error diagnostic when deferral is disallowed")
+				}
+				hasUnknownErr := false
+				for _, diag := range resp.Diagnostics.Errors() {
+					if strings.Contains(diag.Summary(), "Value Conversion Error") {
+						t.Fatalf("unexpected Value Conversion Error diagnostic: %v", diag)
+					}
+					if strings.Contains(diag.Summary(), "Unknown Data Source Configuration") {
+						hasUnknownErr = true
+					}
+				}
+				if !hasUnknownErr {
+					t.Fatalf("expected 'Unknown Data Source Configuration' error, got: %v", resp.Diagnostics)
+				}
+			}
+		})
+	}
+}
+
+func TestBaseImagesDataSource_Read_NullListElements(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	var receivedLabels []string
+	var receivedStages []imagesv1beta.ReleaseStage
+	srv.Image.ListBaseImagesFunc = func(ctx context.Context, req *githubv1beta.ListBaseImagesRequest) (*githubv1beta.ListBaseImagesResponse, error) {
+		if req.Labels != nil {
+			receivedLabels = req.Labels.Values
+		}
+		receivedStages = req.ReleaseStages
+		return &githubv1beta.ListBaseImagesResponse{
+			Images: []*githubv1beta.RunnerBaseImage{sampleBaseImages()[0]},
+		}, nil
+	}
+
+	d, schemaResp := setupTestDataSourceBaseImages(t, srv)
+
+	labelsList, diags := types.ListValue(types.StringType, []attr.Value{types.StringNull(), types.StringValue("ubuntu-24.04")})
+	if diags.HasError() {
+		t.Fatalf("failed to build labels list: %v", diags)
+	}
+	stagesList, diags := types.ListValue(types.StringType, []attr.Value{types.StringNull(), types.StringValue("PRODUCTION")})
+	if diags.HasError() {
+		t.Fatalf("failed to build stages list: %v", diags)
+	}
+
+	configModel := github.BaseImagesDataSourceModel{
+		ID:            types.StringNull(),
+		Labels:        labelsList,
+		ReleaseStages: stagesList,
+		Images:        nil,
+	}
+
+	configState := tfsdk.State{Schema: schemaResp.Schema}
+	if diags := configState.Set(ctx, &configModel); diags.HasError() {
+		t.Fatalf("failed to set config: %v", diags)
+	}
+
+	resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	d.Read(ctx, datasource.ReadRequest{Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: configState.Raw}}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected read errors with null list elements: %v", resp.Diagnostics)
+	}
+	if len(receivedLabels) != 1 || receivedLabels[0] != "ubuntu-24.04" {
+		t.Fatalf("expected null element to be skipped and receivedLabels=['ubuntu-24.04'], got %v", receivedLabels)
+	}
+	if len(receivedStages) != 1 || receivedStages[0] != imagesv1beta.ReleaseStage_PRODUCTION {
+		t.Fatalf("expected null element to be skipped and receivedStages=[PRODUCTION], got %v", receivedStages)
 	}
 }

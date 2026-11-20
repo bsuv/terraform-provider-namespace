@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bsuv/terraform-provider-namespace/internal/apicontract"
+	"github.com/bsuv/terraform-provider-namespace/internal/client"
 
 	builderv1betagrpc "buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/cloud/builder/v1beta/builderv1betagrpc"
 	computev1betagrpc "buf.build/gen/go/namespace/cloud/grpc/go/proto/namespace/cloud/compute/v1beta/computev1betagrpc"
@@ -35,10 +36,6 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"namespacelabs.dev/integrations/api"
-	"namespacelabs.dev/integrations/auth"
-	"namespacelabs.dev/integrations/nsc/apienv"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 )
 
 // Compile gate asserting all retained gRPC client interfaces, methods, request/response structs,
@@ -117,7 +114,6 @@ func TestAPIContractCompilation(t *testing.T) {
 		},
 		CacheVolumeSettings: []*githubv1beta.CacheVolumeSettings{
 			{
-				VolumeTag:                 "build-cache",
 				VolumeSizeGb:              100,
 				VolumeReservedSizeGb:      10,
 				BundledContainerCache:     true,
@@ -147,6 +143,13 @@ func TestAPIContractCompilation(t *testing.T) {
 		},
 		AccessLevel: githubv1beta.AccessLevel_ACCESS_LEVEL_PERMISSIVE,
 		SwapSizeMb:  2048,
+		CustomPermissions: []*iamv1beta.Permission{
+			{
+				ResourceType: "vault/object",
+				ResourceId:   "sec_123",
+				Actions:      []string{"read"},
+			},
+		},
 	}
 
 	profileWithStatus := &githubv1beta.RunnerProfileWithStatus{
@@ -187,6 +190,7 @@ func TestAPIContractCompilation(t *testing.T) {
 	_ = githubv1beta.AccessLevel_ACCESS_LEVEL_UNSPECIFIED
 	_ = githubv1beta.AccessLevel_ACCESS_LEVEL_LIMITED
 	_ = githubv1beta.AccessLevel_ACCESS_LEVEL_RESTRICTED
+	_ = githubv1beta.AccessLevel_ACCESS_LEVEL_CUSTOM
 	_ = githubv1beta.NetworkPolicy_EGRESS_POLICY_UNKNOWN
 	_ = githubv1beta.NetworkPolicy_EGRESS_POLICY_NONE
 	_ = githubv1beta.NetworkPolicy_EGRESS_POLICY_TAG
@@ -218,10 +222,50 @@ func TestAPIContractCompilation(t *testing.T) {
 	}
 	_ = imagesv1beta.ReleaseStage_STAGE_UNKNOWN
 
-	// 4. Assert IAM Tenant & Membership Structs
+	// 4. Assert IAM Tenant & Membership Structs & compute.v1beta UsagePolicy Limits
+	_ = &computev1beta.UsagePolicy{
+		ConcurrencyLimits: &computev1beta.UsagePolicy_ConcurrencyLimits{
+			MaxCpu:           8,
+			MaxMemoryMb:      16384,
+			MaxInstanceCount: 10,
+		},
+		UsageLimits: &computev1beta.UsagePolicy_UsageLimits{
+			UnitMinutes: 1000,
+			Builds:      100,
+			WallSeconds: 36000,
+		},
+		EnabledPlatforms: []string{"linux/amd64", "windows/amd64"},
+		PerPlatformLimits: map[string]*computev1beta.UsagePolicy_PerPlatformLimits{
+			"linux/amd64": {
+				ConcurrencyLimits: &computev1beta.UsagePolicy_ConcurrencyLimits{
+					MaxCpu: 4,
+				},
+				ShapeLimits: &computev1beta.UsagePolicy_ShapeLimits{
+					LargestAcceptableShape: &computev1beta.UsagePolicy_MachineShapeSize{
+						Cpu:      8,
+						MemoryMb: 16384,
+					},
+				},
+				PerShapeLimits: []*computev1beta.UsagePolicy_PerShapeLimits{
+					{
+						Shape: &computev1beta.UsagePolicy_MachineShapeSize{
+							Cpu:      4,
+							MemoryMb: 8192,
+						},
+						Limits: &computev1beta.UsagePolicy_ConcurrencyLimits{
+							MaxInstanceCount: 2,
+						},
+					},
+				},
+			},
+		},
+		DevboxLimits: &computev1beta.UsagePolicy_DevboxLimits{
+			MaxCount: 5,
+		},
+	}
 	tenantPolicy := &iamv1beta.TenantGroupPolicy{
 		Policy: "namespace.cloud.compute.v1beta.UsagePolicy",
-		Value:  `{"max_concurrent_instances": 10}`,
+		Value:  `{"concurrency_limits":{"max_instance_count":10}}`,
 	}
 	_ = &iamv1beta.EnsureTenantGroupRequest{
 		Name:     "engineering",
@@ -266,8 +310,8 @@ func TestAPIContractCompilation(t *testing.T) {
 		DurationSecs: 3600,
 		Policies: []*iamv1beta.TenantTokenPolicy{
 			{
-				PolicyType: "namespace.cloud.iam.v1beta.AdminPolicy",
-				Value:      "{}",
+				PolicyType: "namespace.cloud.compute.v1beta.UsagePolicy",
+				Value:      `{"concurrency_limits":{"max_cpu":8}}`,
 			},
 		},
 	}
@@ -497,15 +541,16 @@ func TestAPIContractCompilation(t *testing.T) {
 		},
 	}
 
-	// 7. Assert Integrations SDK Connection & Auth API
-	_ = apienv.GlobalEndpoint()
-	_ = apienv.IAMEndpoint()
+	// 7. Assert inlined Client Auth & Transport Security API
+	_ = client.DefaultGlobalEndpoint
+	_ = client.DefaultIAMEndpoint
 
-	var _ api.TokenSource = nil
-	_, _ = auth.LoadLocalToken("/dev/null")
+	var _ client.TokenSource = nil
+	_, _ = client.ExtractClaims("")
+	_ = client.ErrNotLoggedIn
 
-	// Ensure grpcapi compile surface is accessible
-	_ = grpcapi.RequireTransportSecurity
+	// Ensure RequireTransportSecurity compile surface is accessible
+	_ = client.RequireTransportSecurity
 	var _ = grpc.WithUserAgent("test")
 
 	t.Logf("Compile gate passed: all gRPC client interfaces, methods, request/response structs, and enums verified.")

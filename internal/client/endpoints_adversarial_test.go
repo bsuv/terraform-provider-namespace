@@ -11,11 +11,10 @@ import (
 	"github.com/bsuv/terraform-provider-namespace/internal/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 )
 
 func init() {
-	grpcapi.RequireTransportSecurity = false
+	client.RequireTransportSecurity = false
 }
 
 // TestEndpointPool_ConcurrentDialsAndClose runs an aggressive race test

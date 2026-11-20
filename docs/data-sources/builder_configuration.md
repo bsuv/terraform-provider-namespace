@@ -54,5 +54,5 @@ Read-Only:
 
 - `machine_arch` (String) Architecture (`amd64`, `arm64`).
 - `memory_megabytes` (Number) RAM in megabytes.
-- `os` (String) OS family (`linux`, `macos`).
+- `os` (String) OS family (`linux`, `macos`, `windows`).
 - `virtual_cpu` (Number) Number of virtual CPUs.

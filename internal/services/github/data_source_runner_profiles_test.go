@@ -2,11 +2,16 @@ package github_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	computev1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/compute/v1beta"
 	githubv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/github/v1beta"
+	iamv1beta "buf.build/gen/go/namespace/cloud/protocolbuffers/go/proto/namespace/cloud/iam/v1beta"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	dschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -59,6 +64,25 @@ func TestRunnerProfilesDataSource_Schema(t *testing.T) {
 	}
 	if _, exists := attrs["profiles"]; !exists {
 		t.Error("missing 'profiles' attribute in runner profiles data source schema")
+	}
+
+	profilesAttr := attrs["profiles"].(dschema.ListNestedAttribute)
+	nested := profilesAttr.NestedObject.Attributes
+	if _, exists := nested["custom_permissions"]; !exists {
+		t.Error("missing 'custom_permissions' attribute in runner profiles nested schema")
+	}
+	cvAttr := nested["cache_volume_settings"].(dschema.ListNestedAttribute)
+	if _, hasVolTag := cvAttr.NestedObject.Attributes["volume_tag"]; hasVolTag {
+		t.Error("runner profiles cache_volume_settings schema must not contain removed attribute 'volume_tag'")
+	}
+	shapeAttr := nested["instance_shape"].(dschema.SingleNestedAttribute)
+	osAttr := shapeAttr.Attributes["os"].(dschema.StringAttribute)
+	if !strings.Contains(strings.ToLower(osAttr.Description), "windows") {
+		t.Errorf("expected profiles.*.instance_shape.os description to include 'windows', got %q", osAttr.Description)
+	}
+	alAttr := nested["access_level"].(dschema.StringAttribute)
+	if !strings.Contains(alAttr.Description, "ACCESS_LEVEL_CUSTOM") {
+		t.Errorf("expected profiles.*.access_level description to include 'ACCESS_LEVEL_CUSTOM', got %q", alAttr.Description)
 	}
 }
 
@@ -183,5 +207,55 @@ func TestRunnerProfilesDataSource_Read_GRPCError(t *testing.T) {
 	d.Read(ctx, req, resp)
 	if !resp.Diagnostics.HasError() {
 		t.Fatal("expected error diagnostic on gRPC failure")
+	}
+}
+
+func TestRunnerProfilesDataSource_Read_CustomPermissionsAndWindows(t *testing.T) {
+	ctx := context.Background()
+	srv := testutil.NewMockServer()
+
+	p := sampleFullProfile("prof_list_custom_win", 1)
+	p.Spec.Os = "windows-2022"
+	p.Spec.AccessLevel = githubv1beta.AccessLevel(4)
+	p.Spec.CustomPermissions = []*iamv1beta.Permission{
+		{ResourceType: "cache/bazel", ResourceId: "c1", Actions: []string{"read", "write"}},
+	}
+	p.Spec.InstanceShape = &computev1beta.InstanceShape{
+		VirtualCpu:      4,
+		MemoryMegabytes: 8192,
+		MachineArch:     "amd64",
+		Os:              "windows",
+	}
+
+	srv.Profile.ListProfilesFunc = func(ctx context.Context, req *emptypb.Empty) (*githubv1beta.ListProfilesResponse, error) {
+		return &githubv1beta.ListProfilesResponse{
+			Profiles: []*githubv1beta.RunnerProfileWithStatus{p},
+		}, nil
+	}
+
+	d, schemaResp := setupTestDataSourceRunnerProfiles(t, srv)
+	resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schemaResp.Schema}}
+	d.Read(ctx, datasource.ReadRequest{Config: tfsdk.Config{Schema: schemaResp.Schema}}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected read errors: %v", resp.Diagnostics)
+	}
+
+	var got github.RunnerProfilesDataSourceModel
+	_ = resp.State.Get(ctx, &got)
+	if len(got.Profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(got.Profiles))
+	}
+	if got.Profiles[0].AccessLevel.ValueString() != "ACCESS_LEVEL_CUSTOM" {
+		t.Errorf("expected ACCESS_LEVEL_CUSTOM, got %q", got.Profiles[0].AccessLevel.ValueString())
+	}
+	var perms []github.CustomPermissionModel
+	_ = got.Profiles[0].CustomPermissions.ElementsAs(ctx, &perms, false)
+	if len(perms) != 1 || perms[0].ResourceType.ValueString() != "cache/bazel" || perms[0].ResourceID.ValueString() != "c1" {
+		t.Errorf("unexpected custom_permissions: %+v", perms)
+	}
+	var shape github.InstanceShapeModel
+	_ = got.Profiles[0].InstanceShape.As(ctx, &shape, basetypes.ObjectAsOptions{})
+	if shape.OS.ValueString() != "windows" {
+		t.Errorf("expected instance_shape.os 'windows', got %q", shape.OS.ValueString())
 	}
 }

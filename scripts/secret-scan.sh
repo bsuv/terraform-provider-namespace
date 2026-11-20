@@ -114,8 +114,9 @@ scan_working_tree \
   -e 'ghp_[A-Za-z0-9_]{36}' \
   -e 'gho_[A-Za-z0-9_]{36}' \
   -e 'xoxb-[0-9]{11,12}-[0-9]{11,12}-[A-Za-z0-9]{24}' \
-  -e '(nsct|nscw|nscu|tok|st)_eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}' \
-  -e '(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}([^A-Za-z0-9_-]|$)'
+  -e '(nsct|nscw|nscu|nsrt|tok|st)_eyJ[A-Za-z0-9_-]{8,}={0,2}\.[A-Za-z0-9_-]{8,}={0,2}\.[A-Za-z0-9_-]{8,}={0,2}' \
+  -e '(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]+_)?eyJ[A-Za-z0-9_-]{8,}={0,2}\.[A-Za-z0-9_-]{8,}={0,2}\.[A-Za-z0-9_-]{8,}={0,2}([^A-Za-z0-9_=-]|$)' \
+  -e '(^|[^A-Za-z0-9_])nsrt_[A-Za-z0-9._-]{16,}([^A-Za-z0-9._-]|$)'
 
 # Ensure allowlisted local metadata directories are never tracked in Git.
 if [[ -n "$(git -C "${REPO_ROOT}" ls-files .agents)" ]]; then

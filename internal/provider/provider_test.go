@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"namespacelabs.dev/integrations/nsc/grpcapi"
 )
 
 func TestProvider_Schema(t *testing.T) {
@@ -42,7 +41,7 @@ func TestProvider_Schema(t *testing.T) {
 }
 
 func TestProvider_Configure_WithMockServer(t *testing.T) {
-	grpcapi.RequireTransportSecurity = false
+	client.RequireTransportSecurity = false
 
 	srv := testutil.NewMockServer()
 	srv.Start()
